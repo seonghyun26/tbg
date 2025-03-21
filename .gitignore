@@ -1,0 +1,11 @@
+models/*
+result_data/*
+wandb/*
+
+**__pycache__**
+
+*.png
+*.npz
+*.npy
+*.pt
+*.pdb

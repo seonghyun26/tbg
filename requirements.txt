@@ -1,0 +1,13 @@
+einops
+matplotlib
+mdtraj
+networkx 
+numpy 
+scikit-learn
+scipy
+tensorboard
+torch
+torchdiffeq
+torchvision
+tqdm
+
