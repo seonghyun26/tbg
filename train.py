@@ -79,6 +79,7 @@ data_xyz = torch.load(data_xyz_path)
 data_distance_path = args.data_distance_path
 data_distance = torch.load(data_distance_path)
 batch_iter = IndexBatchIterator(len(data_xyz), n_batch)
+# sample_batch_iter = IndexBatchIterator(len(data_xyz), n_batch // 2)
 # Dataset size: data num * (current, time lag, distance, time lag distance) * coordinates (66)
 
 optim = torch.optim.Adam(flow.parameters(), lr=5e-4)
@@ -117,9 +118,7 @@ for epoch in pbar:
         
         # Flow
         # vt = flow._dynamics._dynamics._dynamics_function(t, x)
-        # x = torch.cat([x, x1_distance], dim=1)
-        cv_condition = x1_distance
-        vt = flow._dynamics._dynamics._dynamics_function(t, x, cv_condition)
+        vt = flow._dynamics._dynamics._dynamics_function(t, x, x1_distance)
         loss = torch.mean((vt - ut) ** 2)
         loss.backward()
         optim.step()
@@ -144,39 +143,39 @@ for epoch in pbar:
             PATH_last + f"/_mlcv_{epoch}.pt",   
         )
         
-    if epoch % args.sample_epoch == 0 and epoch != 0:
-        print(f"Sampling test at epoch {epoch}")
-        latent_np = np.empty(shape=(0))
-        samples_np = np.empty(shape=(0))
-        dlogp_np = np.empty(shape=(0))
+    # if epoch % args.sample_epoch == 0 and epoch != 0:
+    #     print(f"Sampling test at epoch {epoch}")
+    #     latent_np = np.empty(shape=(0))
+    #     samples_np = np.empty(shape=(0))
+    #     dlogp_np = np.empty(shape=(0))
         
-        for it, idx in enumerate(tqdm(
-            batch_iter,
-            desc = "Sampling from BG"
-        )):
-            # Load data
-            x1 = data_xyz[idx][:, 1].cuda()
-            x1_distance = data_distance[idx][:, 0].cuda()
-            batchsize = x1.shape[0]
-            t = torch.rand(batchsize, 1).cuda()
-            x0 = prior_cpu.sample(batchsize).cuda()
+    #     for it, idx in enumerate(tqdm(
+    #         sample_batch_iter,
+    #         desc = "Sampling from BG"
+    #     )):
+    #         # Load data
+    #         x1 = data_xyz[idx][:, 1].cuda()
+    #         x1_distance = data_distance[idx][:, 0].cuda()
+    #         batchsize = x1.shape[0]
+    #         t = torch.rand(batchsize, 1).cuda()
+    #         x0 = prior_cpu.sample(batchsize).cuda()
 
-            # Check reconstruction
-            with torch.no_grad():
-                samples, latent, dlogp = bg.sample(n_samples=batchsize, prior_samples=x0, cv_condition=x1_distance, with_latent=True, with_dlogp=True)
-                latent_np = np.append(latent_np, latent.detach().cpu().numpy())
-                samples_np = np.append(samples_np, samples.detach().cpu().numpy())
-                dlogp_np = np.append(dlogp_np, dlogp.cpu().numpy())
+    #         # Check reconstruction
+    #         with torch.no_grad():
+    #             samples, latent, dlogp = bg.sample(n_samples=batchsize, prior_samples=x0, cv_condition=x1_distance, with_latent=True, with_dlogp=True)
+    #             latent_np = np.append(latent_np, latent.detach().cpu().numpy())
+    #             samples_np = np.append(samples_np, samples.detach().cpu().numpy())
+    #             dlogp_np = np.append(dlogp_np, dlogp.cpu().numpy())
 
-            latent_np = latent_np.reshape(-1, dim)
-            samples_np = samples_np.reshape(-1, dim)
-            np.savez(
-                f"result_data/tbgcv/sample_{epoch}",
-                latent_np=latent_np,
-                samples_np=samples_np,
-                dlogp_np=dlogp_np,
-                x1=x1.cpu().numpy(),
-        )
+    #         latent_np = latent_np.reshape(-1, dim)
+    #         samples_np = samples_np.reshape(-1, dim)
+    #         np.savez(
+    #             f"result_data/tbgcv/sample_{epoch}",
+    #             latent_np=latent_np,
+    #             samples_np=samples_np,
+    #             dlogp_np=dlogp_np,
+    #             x1=x1.cpu().numpy(),
+    #     )
 
 print(f">> Final epoch {epoch}")
 torch.save(

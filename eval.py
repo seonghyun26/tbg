@@ -24,7 +24,7 @@ from networkx import isomorphism
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Sampling from TBG model')
-    parser.add_argument('--file_name', type=str, default= "sample_500", help='Path to saved file')
+    parser.add_argument('--file_name', type=str, default= "tbg-v1", help='Path to saved file')
     return parser.parse_args()
 
 args = parse_args()
@@ -127,7 +127,6 @@ ax.set_xlabel(r"$\varphi$", fontsize=45)
 ax.set_title("Boltzmann Generator", fontsize=45)
 ax.xaxis.set_tick_params(labelsize=25)
 ax.yaxis.set_tick_params(labelsize=25)
-ax.yaxis.set_ticks([])
 
 cbar = fig.colorbar(im, ticks=ticks)
 cbar.ax.set_yticklabels([6.0,4.0,2.0,0.0], fontsize=25)
