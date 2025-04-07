@@ -1,14 +1,16 @@
+import os
 import tqdm
 import torch
 import wandb
 import numpy as np
+import time  # Add time module import
 
 import argparse
 
 from bgflow.utils import as_numpy, IndexBatchIterator
 from bgflow import DiffEqFlow, BoltzmannGeneratorCV, MeanFreeNormalDistribution
 from bgflow import BlackBoxDynamics, BruteForceEstimator
-from tbg.modelwithcv import EGNN_AD2_CV, EGNN_AD2_CFG
+from tbg.modelwithcv import EGNN_AD2_CV
 from bgflow import BlackBoxDynamics, BruteForceEstimator
 
 
@@ -69,7 +71,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Sample from TBG')
     parser.add_argument('--data_xyz_path', type=str, default= "../../simulation/dataset/alanine/300.0/timelag-10n-v1/xyz-tbg.pt", help='Path to xyz data file')
     parser.add_argument('--data_distance_path', type=str, default= "../../simulation/dataset/alanine/300.0/timelag-10n-v1/distance-tbg.pt", help='Path to distance data file')
-    parser.add_argument('--data_type', type=str, default= "1n", help='data type')
+    parser.add_argument('--filename', type=str, default= "tbgcv", help='checkpoint name')
+    parser.add_argument('--hidden_dim', type=int, default="256", help='hidden dimension of EGNN')
+    parser.add_argument('--state', type=str, default="c5", help='one state condition for sampling')
+    parser.add_argument('--n_samples', type=int, default= 40, help='number of samples')
+    parser.add_argument('--n_sample_batches', type=int, default= 20, help='number of samples batch')
+    parser.add_argument('--tags', nargs='*', help='Tags for Wandb')
+    
     return parser.parse_args()
 
 args = parse_args()
@@ -78,32 +86,33 @@ n_particles = 22
 n_dimensions = 3
 dim = n_particles * n_dimensions
 scaling = 10
-n_particles = 22
-n_dimensions = 3
-dim = n_particles * n_dimensions
 
 wandb.init(
     project="tbg",
     entity="eddy26",
+    config=vars(args),
+    tags=["condition", "ECNF++"] + args.tags,
 )
 
 atom_types = np.arange(22)
+# atom_types[[0, 2, 3]] = 0
+# atom_types[1] = 2
 atom_types[[1, 2, 3]] = 2
-atom_types[[19, 20, 21]] = 20
 atom_types[[11, 12, 13]] = 12
+atom_types[[19, 20, 21]] = 20
 h_initial = torch.nn.functional.one_hot(torch.tensor(atom_types))
 
 # now set up a prior
+print(">> Setting up")
 prior = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False).cuda()
 prior_cpu = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False)
-
 brute_force_estimator = BruteForceEstimator()
 net_dynamics = EGNN_AD2_CV(
     n_particles=n_particles,
     device="cuda",
     n_dimension=dim // n_particles,
     h_initial=h_initial,
-    hidden_nf=64,
+    hidden_nf=args.hidden_dim,
     act_fn=torch.nn.SiLU(),
     n_layers=5,
     recurrent=True,
@@ -114,12 +123,13 @@ net_dynamics = EGNN_AD2_CV(
     agg="sum",
 )
 
+# Set up the dynamics
 bb_dynamics = BlackBoxDynamics(
     dynamics_function=net_dynamics, divergence_estimator=brute_force_estimator
 )
 flow = DiffEqFlow(dynamics=bb_dynamics)
 bg = BoltzmannGeneratorCV(prior, flow, prior).cuda()
-
+bg.eval()
 
 class BruteForceEstimatorFast(torch.nn.Module):
     """
@@ -147,6 +157,7 @@ class BruteForceEstimatorFast(torch.nn.Module):
         return dxs, -divergence.view(-1, 1)
 
 
+print(">> Loading force estimator")
 brute_force_estimator_fast = BruteForceEstimatorFast()
 bb_dynamics._divergence_estimator = brute_force_estimator_fast
 bg.flow._integrator_atol = 1e-4
@@ -155,85 +166,110 @@ flow._use_checkpoints = False
 flow._kwargs = {}
 
 
-filename = "tbg"
-PATH_last = f"models/tbgcv/1n/{filename}.pt"
-# PATH_last = f"models/tbgcv-both/10n/{filename}.pt"
+filename = args.filename
+PATH_last = f"models/{filename}.pt"
 checkpoint = torch.load(PATH_last)
 flow.load_state_dict(checkpoint["model_state_dict"])
+if not os.path.exists(f"result_data/{filename}/"):
+    os.makedirs(f"result_data/{filename}/")
 
-
-n_batch = 256
-data_xyz_path = args.data_xyz_path
-data_xyz = torch.load(data_xyz_path)
-data_distance_path = args.data_distance_path
-data_distance = torch.load(data_distance_path)
-batch_iter = IndexBatchIterator(len(data_xyz), n_batch)
 
 # n_samples = 400
 # n_sample_batches = 500
-n_samples = n_batch
-n_sample_batches = 400
-latent_np = np.empty(shape=(0))
-samples_np = np.empty(shape=(0))
-dlogp_np = np.empty(shape=(0))
-print(f"Start sampling with {filename}")
+n_samples = args.n_samples
+n_batch = n_samples
+n_sample_batches = args.n_sample_batches
+# latent_np = np.empty(shape=(0))
+# samples_np = np.empty(shape=(0))
+# dlogp_np = np.empty(shape=(0))
 
-# Condition CV on c5 state
-# c5_path = f"../../simulation/data/alanine/c7ax.pt"
-# c5_xyz = torch.load(c5_path)['xyz']
-# c5_heavy_atom_distance = coordinate2distance(c5_xyz).cuda()
-# c5_heavy_atom_distance = c5_heavy_atom_distance.repeat(n_samples, 1)
-# for i in tqdm.tqdm(range(n_sample_batches)):
+
+# Condition CV on state
+if args.state == "c5":
+    state_path = f"../../simulation/data/alanine/c5.pt"
+elif args.state == "c7ax":
+    state_path = f"../../simulation/data/alanine/c7ax.pt"
+elif args.state == "training":
+    pass
+else:
+    raise ValueError(f"Unknown state {args.state}")
+
+if args.state in ["c5", "c7ax"]:
+    state_xyz = torch.load(state_path)['xyz']
+    state_heavy_atom_distance = coordinate2distance(state_xyz).cuda()
+    state_heavy_atom_distance = state_heavy_atom_distance.repeat(n_samples, 1)
+else:
+    # condition on training data
+    data_xyz_path = args.data_xyz_path
+    data_xyz = torch.load(data_xyz_path)
+    data_distance_path = args.data_distance_path
+    data_distance = torch.load(data_distance_path)
+    batch_iter = IndexBatchIterator(len(data_xyz), n_batch)
+    rmsd = []
+    heavy_atom_distance_avg = []
+    heavy_atom_distance_difference = []
+    mse = torch.nn.MSELoss()
+    
+print(f">> Sampling with {filename} for {args.state}")
+latent_torch = torch.empty((n_samples * n_sample_batches, dim), dtype=torch.float32).cuda()
+samples_torch = torch.empty((n_samples * n_sample_batches, dim), dtype=torch.float32).cuda()
+dlogp_torch = torch.empty((n_samples * n_sample_batches, 1), dtype=torch.float32).cuda()
+total_start_time = time.time()
+pbar = tqdm.tqdm(
+    range(n_sample_batches),
+    desc="Sampling from BG: xx.xx seconds"
+)
+for i in pbar:
+    with torch.no_grad():
+        batch_start_time = time.time()
+        # print("Start sampling at {}")
+        samples, latent, dlogp = bg.sample(n_samples, cv_condition=state_heavy_atom_distance, with_latent=True, with_dlogp=True)
+        batch_end_time = time.time()
+        pbar.set_description(f"Sampling from BG: {batch_end_time - batch_start_time:.2f} seconds")
+        # print(f"Batch {i} sampling time: {batch_end_time - batch_start_time:.2f} seconds")
+        latent_torch[i * n_samples : (i + 1) * n_samples, :] = latent
+        samples_torch[i * n_samples : (i + 1) * n_samples, :] = samples
+        dlogp_torch[i * n_samples : (i + 1) * n_samples, :] = dlogp
+
+# TODO: Sampling with guidance scale in case of CFG
+
+# for it, idx in enumerate(tqdm.tqdm(batch_iter, desc="Sampling from BG")):
+#     x1 = data_xyz[idx][:, 1].cuda()
+#     x1_distance = data_distance[idx][:, 0].cuda()
+#     heavy_atom_distance_avg.append(x1_distance.mean())
+#     n_samples = x1.shape[0]
 #     with torch.no_grad():
-#         samples, latent, dlogp = bg.sample(n_samples, cv_condition=c5_heavy_atom_distance, with_latent=True, with_dlogp=True)
+#         samples, latent, dlogp = bg.sample(n_samples, cv_condition=x1_distance, with_latent=True, with_dlogp=True)
 #         latent_np = np.append(latent_np, latent.detach().cpu().numpy())
 #         samples_np = np.append(samples_np, samples.detach().cpu().numpy())
 #         dlogp_np = np.append(dlogp_np, as_numpy(dlogp))
-
-
-rmsd = []
-heavy_atom_distance_avg = []
-heavy_atom_distance_difference = []
-mse = torch.nn.MSELoss()
-
-for it, idx in enumerate(tqdm.tqdm(batch_iter, desc="Sampling from BG")):
-    x1 = data_xyz[idx][:, 1].cuda()
-    x1_distance = data_distance[idx][:, 0].cuda()
-    heavy_atom_distance_avg.append(x1_distance.mean())
-    n_samples = x1.shape[0]
-    with torch.no_grad():
-        samples, latent, dlogp = bg.sample(n_samples, cv_condition=x1_distance, with_latent=True, with_dlogp=True)
-        latent_np = np.append(latent_np, latent.detach().cpu().numpy())
-        samples_np = np.append(samples_np, samples.detach().cpu().numpy())
-        dlogp_np = np.append(dlogp_np, as_numpy(dlogp))
     
-    rmsd_list = []
-    for i in range(n_samples):
-        sample = samples[i].reshape(-1, 3)
-        reference = x1[i].reshape(-1, 3)
-        rmsd_list.append(kabsch_rmsd(reference, sample))
+#     rmsd_list = []
+#     for i in range(n_samples):
+#         sample = samples[i].reshape(-1, 3)
+#         reference = x1[i].reshape(-1, 3)
+#         rmsd_list.append(kabsch_rmsd(reference, sample))
     
-    rmsd.append(torch.stack(rmsd_list).mean())
-    heavy_atom_distance_difference.append(mse(coordinate2distance(samples), x1_distance))
+#     rmsd.append(torch.stack(rmsd_list).mean())
+#     heavy_atom_distance_difference.append(mse(coordinate2distance(samples), x1_distance))
+# wandb.log({
+#     "rmsd": torch.stack(rmsd).mean(),
+#     "heavy_atom_distance_difference": torch.stack(heavy_atom_distance_difference).mean(),
+#     "heavy_atom_distance_avg": torch.stack(heavy_atom_distance_avg).mean(),
+#     "heavy_atom_distance_std": torch.stack(heavy_atom_distance_avg).std(),
+# })
+# print(f"RMSD: {torch.stack(rmsd).mean()}")
+# print(f"Heavy atom distance difference: {torch.stack(heavy_atom_distance_difference).mean()}")
+# print(f"Heavy atom distance avg: {torch.stack(heavy_atom_distance_avg).mean()}")
+# print(f"Heavy atom distance std: {torch.stack(heavy_atom_distance_avg).std()}")
 
 
-wandb.log({
-    "rmsd": torch.stack(rmsd).mean(),
-    "heavy_atom_distance_difference": torch.stack(heavy_atom_distance_difference).mean(),
-    "heavy_atom_distance_avg": torch.stack(heavy_atom_distance_avg).mean(),
-    "heavy_atom_distance_std": torch.stack(heavy_atom_distance_avg).std(),
-})
-print(f"RMSD: {torch.stack(rmsd).mean()}")
-print(f"Heavy atom distance difference: {torch.stack(heavy_atom_distance_difference).mean()}")
-print(f"Heavy atom distance avg: {torch.stack(heavy_atom_distance_avg).mean()}")
-print(f"Heavy atom distance std: {torch.stack(heavy_atom_distance_avg).std()}")
+torch.save(latent_torch, f"result_data/{filename}/latent-{args.state}.pt")
+torch.save(samples_torch, f"result_data/{filename}/samples-{args.state}.pt")
+torch.save(dlogp_torch, f"result_data/{filename}/dlogp-{args.state}.pt")
+print(f"Saved data at result_data/{filename}/")
 
-latent_np = latent_np.reshape(-1, dim)
-samples_np = samples_np.reshape(-1, dim)
-np.savez(
-    f"result_data/{filename}-v2",
-    latent_np=latent_np,
-    samples_np=samples_np,
-    dlogp_np=dlogp_np,
-)
-print(f"Saved data at {filename}")
+total_end_time = time.time()
+print(f"Total sampling time: {total_end_time - total_start_time:.2f} seconds")
+print(f"Average time per batch: {(total_end_time - total_start_time) / n_sample_batches:.2f} seconds")
+

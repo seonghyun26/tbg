@@ -28,6 +28,8 @@ wandb.init(
 
 atom_types = np.arange(22)
 atom_types[[1, 2, 3]] = 2
+# atom_types[[0, 2, 3]] = 0
+# atom_types[1] = 2
 atom_types[[19, 20, 21]] = 20
 atom_types[[11, 12, 13]] = 12
 h_initial = torch.nn.functional.one_hot(torch.tensor(atom_types))
@@ -57,11 +59,8 @@ net_dynamics = EGNN_dynamics_AD2_cat(
 bb_dynamics = BlackBoxDynamics(
     dynamics_function=net_dynamics, divergence_estimator=brute_force_estimator
 )
-
 flow = DiffEqFlow(dynamics=bb_dynamics)
-
 bg = BoltzmannGeneratorCV(prior, flow, prior).cuda()
-
 
 class BruteForceEstimatorFast(torch.nn.Module):
     """
@@ -98,9 +97,7 @@ flow._use_checkpoints = False
 flow._kwargs = {}
 
 
-filename = "FM-AD2-train-repro"
-
-
+filename = "FM-AD2-train-repro-custom-data"
 PATH_last = f"models/{filename}"
 checkpoint = torch.load(PATH_last)
 flow.load_state_dict(checkpoint["model_state_dict"])
@@ -108,15 +105,15 @@ flow.load_state_dict(checkpoint["model_state_dict"])
 # n_samples = 400
 # n_sample_batches = 500
 n_samples = 200
-n_sample_batches = 200
+n_sample_batches = 400
 latent_np = np.empty(shape=(0))
 samples_np = np.empty(shape=(0))
 dlogp_np = np.empty(shape=(0))
-print(f"Start sampling with {filename}")
 
+print(f"Start sampling with {filename}")
 for i in tqdm.tqdm(range(n_sample_batches)):
     with torch.no_grad():
-        samples, latent, dlogp = bg.sample(n_samples, with_latent=True, with_dlogp=True)
+        samples, latent, dlogp = bg.sample(n_samples, cv_condition=None, with_latent=True, with_dlogp=True)
         latent_np = np.append(latent_np, latent.detach().cpu().numpy())
         samples_np = np.append(samples_np, samples.detach().cpu().numpy())
         dlogp_np = np.append(dlogp_np, as_numpy(dlogp))

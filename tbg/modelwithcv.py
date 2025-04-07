@@ -46,8 +46,10 @@ class TBGCV(BaseCV, lightning.LightningModule):
             x = self.norm_in(x)
         x = self.encoder(x)
         
-        if self.cv_normalize:
-            x = self._map_range(x)
+        # if self.cv_normalize:
+        #     x = self._map_range(x)
+        
+        x = torch.nn.functional.normalize(x, p=2, dim=1)
         return x
 
     def set_cv_range(self, cv_min, cv_max, cv_std):
@@ -154,6 +156,7 @@ class EGNN_AD2_CV(nn.Module):
         cv_dimension = encoder_layers[-1]
         self.cv = TBGCV(encoder_layers=encoder_layers).to(device)
         self.cv.train()
+        print(self.cv)
         
         # Initial one hot encoding of the different element types
         self.h_initial = h_initial
@@ -199,8 +202,9 @@ class EGNN_AD2_CV(nn.Module):
         h = self.h_initial.to(self.device).reshape(1,-1)
         h = h.repeat(n_batch, 1)
         h = h.reshape(n_batch * self._n_particles, -1)
+        
         cv_condition = cv.repeat(self._n_particles, 1).reshape(n_batch * self._n_particles, -1)
-        h = torch.cat([h, cv_condition], dim=1)
+        h = torch.cat([h, cv_condition], dim=-1)
         
         # Time
         t = torch.as_tensor(t, device=xs.device)
@@ -291,13 +295,14 @@ class EGNN_AD2_CFG(nn.Module):
         self.counter = 0
 
 
-    def forward(self, t, xs):
+    def forward(self, t, xs, cv_condition=None):
         # CV shape: batch_size * cv_dimension
-        heavy_atom_distance = xs[:, self._n_particles * 3:]
-        cv = self.cv.forward_cv(heavy_atom_distance)
+        if cv_condition is not None:
+            heavy_atom_distance = xs[:, self._n_particles * 3:]
+            xs = xs[:, :self._n_particles * 3]
+            cv = self.cv.forward_cv(heavy_atom_distance)
 
         # Batch
-        xs = xs[:, :self._n_particles * 3]
         n_batch = xs.shape[0]
         edges = self._cast_edges2batch(self.edges, n_batch, self._n_particles)
         edges = [edges[0], edges[1]]
@@ -308,7 +313,10 @@ class EGNN_AD2_CFG(nn.Module):
         h = self.h_initial.to(self.device).reshape(1,-1)
         h = h.repeat(n_batch, 1)
         h = h.reshape(n_batch * self._n_particles, -1)
-        condition = cv.repeat(n_batch, 1).reshape(n_batch * self._n_particles, -1)
+        if cv_condition is not None:
+            condition = cv.repeat(n_batch, 1).reshape(n_batch * self._n_particles, -1)
+        else:
+            condition = torch.zeros(n_batch * self._n_particles, 2).to(self.device)
         h = torch.cat([h, condition], dim=1)
         
         # Time
@@ -325,7 +333,6 @@ class EGNN_AD2_CFG(nn.Module):
             edge_attr = torch.sum((x[edges[0]] - x[edges[1]])**2, dim=1, keepdim=True)
             _, x_final = self.egnn(h, x, edges, edge_attr=edge_attr)
             vel = x_final - x
-
         else:
             raise NotImplemented()
             

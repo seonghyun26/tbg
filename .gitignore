@@ -1,5 +1,6 @@
-models/*
+AImplicitUnconstrained/*
 result_data/*
+models/*
 wandb/*
 
 **__pycache__**
@@ -9,3 +10,6 @@ wandb/*
 *.npy
 *.pt
 *.pdb
+*.tgz
+*.xml
+*.h5

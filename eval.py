@@ -25,6 +25,9 @@ from networkx import isomorphism
 def parse_args():
     parser = argparse.ArgumentParser(description='Sampling from TBG model')
     parser.add_argument('--file_name', type=str, default= "tbg-v1", help='Path to saved file')
+    parser.add_argument('--state', type=str, default= "c5", help='Conditioning state')
+    parser.add_argument('--topology', type=str, default= "c5", help='State file name for topology')
+    parser.add_argument('--scaling', type=int, default= "1", help='Scaling on data')
     return parser.parse_args()
 
 args = parse_args()
@@ -32,14 +35,14 @@ args = parse_args()
 
 n_particles = 22
 n_dimensions = 3
-scaling = 10
+scaling = args.scaling
 dim = n_particles * n_dimensions
 
-npz_file = np.load(f"./result_data/{args.file_name}.npz")
-latent_np=npz_file["latent_np"]
-samples_np=npz_file["samples_np"]
-dlogp_np=npz_file["dlogp_np"]
-ad2_topology = md.load("data/AD2/c5.pdb").topology
+latent_np = torch.load(f"./result_data/{args.file_name}/latent-{args.state}.pt").cpu().detach().numpy()
+samples_np = torch.load(f"./result_data/{args.file_name}/samples-{args.state}.pt").cpu().detach().numpy()
+dlogp_np = torch.load(f"./result_data/{args.file_name}/dlogp-{args.state}.pt").cpu().detach().numpy()
+topology_file = f"data/AD2/{args.topology}.pdb"
+ad2_topology = md.load(topology_file).topology
 
 
 def align_topology(sample, reference, scaling=scaling):
@@ -76,21 +79,20 @@ atom_types = torch.from_numpy(np.array([atom_dict[atom_type] for atom_type in at
 adj_list = torch.from_numpy(np.array([(b.atom1.index, b.atom2.index) for b in topology.bonds], dtype=np.int32))
 
 
-aligned_samples = []
-aligned_idxs = []
-
-for i, sample in enumerate(tqdm(
-    samples_np.reshape(-1,dim//3, 3),
-    desc = f"Computing samples from npy file"
-)):
-    aligned_sample, is_isomorphic = align_topology(sample, as_numpy(adj_list).tolist())
-    if is_isomorphic:
-        aligned_samples.append(aligned_sample)
-        aligned_idxs.append(i)
-aligned_samples = np.array(aligned_samples)
-aligned_samples.shape
-print(f"Correct configuration rate {len(aligned_samples)/len(samples_np)}")
-print(f"Aligned samples shape: {aligned_samples.shape}")
+# aligned_samples = []
+# aligned_idxs = []
+# for i, sample in enumerate(tqdm(
+#     samples_np.reshape(-1,dim//3, 3),
+#     desc = f"Computing samples from npy file"
+# )):
+#     aligned_sample, is_isomorphic = align_topology(sample, as_numpy(adj_list).tolist())
+#     if is_isomorphic:
+#         aligned_samples.append(aligned_sample)
+#         aligned_idxs.append(i)
+# aligned_samples = np.array(aligned_samples)
+# aligned_samples.shape
+# print(f"Correct configuration rate {len(aligned_samples)/len(samples_np)}")
+# print(f"Aligned samples shape: {aligned_samples.shape}")
 
 
 aligned_samples = samples_np.reshape(-1, 22, 3)
@@ -101,7 +103,7 @@ print(f"Aligned samples shape: {aligned_samples.shape}")
 traj_samples = md.Trajectory(aligned_samples/scaling, topology=topology)
 phis = md.compute_phi(traj_samples)[1].flatten()
 psis = md.compute_psi(traj_samples)[1].flatten()
-sample_for_chirality = md.load("data/AD2/c5.pdb").xyz
+sample_for_chirality = md.load(topology_file).xyz
 chirality_sample_c5 = torch.from_numpy(sample_for_chirality)
 model_samples = torch.from_numpy(traj_samples.xyz)
 chirality_centers = find_chirality_centers(adj_list, atom_types)
@@ -113,31 +115,64 @@ print(f"Correct symmetry rate {(~symmetry_change).sum()/len(model_samples)}")
 
 
 traj_samples = md.Trajectory(as_numpy(model_samples)[~symmetry_change], topology=topology)
-
 phis = md.compute_phi(traj_samples)[1].flatten()
 psis = md.compute_psi(traj_samples)[1].flatten()
 
-
-fig, ax = plt.subplots(figsize=(11, 9))
+# # Plot Ramachandran plot
 plot_range = [-np.pi, np.pi]
-
+fig, ax = plt.subplots(figsize=(11, 9))
 h, x_bins, y_bins, im = ax.hist2d(phis, psis, 100, norm=LogNorm(), range=[plot_range,plot_range],rasterized=True)
 ticks = np.array([np.exp(-6)*h.max(), np.exp(-4.0)*h.max(),np.exp(-2)*h.max(), h.max()])
 ax.set_xlabel(r"$\varphi$", fontsize=45)
 ax.set_title("Boltzmann Generator", fontsize=45)
 ax.xaxis.set_tick_params(labelsize=25)
 ax.yaxis.set_tick_params(labelsize=25)
-
 cbar = fig.colorbar(im, ticks=ticks)
 cbar.ax.set_yticklabels([6.0,4.0,2.0,0.0], fontsize=25)
 cbar.ax.invert_yaxis()
 cbar.ax.set_ylabel(r"Free energy / $k_B T$", fontsize=35)
-fig.savefig(f'./result_data/{args.file_name}.png')  # Save the figure to a file
+fig.savefig(f'./result_data/{args.file_name}/ram-{args.state}.png')  # Save the figure to a file
+print(f"Image saved at {f'./result_data/{args.file_name}/ram-{args.state}.png'}")
 
+# Plot scatter plot
+fig, ax = plt.subplots(figsize=(11, 9))
+ax.scatter(phis, psis, s=10)
+ax.set_xlabel(r"$\varphi$", fontsize=45)
+ax.set_title("Boltzmann Generator", fontsize=45)
+ax.xaxis.set_tick_params(labelsize=25)
+ax.yaxis.set_tick_params(labelsize=25)
+ax.set_xlim(plot_range)
+ax.set_ylim(plot_range)
+fig.show()
+fig.savefig(f'./result_data/{args.file_name}/scatter-{args.state}.png')  # Save the figure to a file
+print(f"Image saved at {f'./result_data/{args.file_name}/scatter-{args.state}.png'}")
 
 
 # Plot energy distribution
-# classical_model_energies = as_numpy(target.energy(model_samples.reshape(-1, dim)[~symmetry_change]))
+# from bgmol.datasets import AImplicitUnconstrained
+# dataset = AImplicitUnconstrained(read=True, download=False)
+# target = dataset.get_energy_model()
+# print("Computing energy...")
+# classical_model_energies = target.energy(model_samples.reshape(-1, dim)).cpu().detach().numpy()
+# print(classical_model_energies.shape)
+# print(classical_model_energies.max())
+# print(classical_model_energies.min())
+# # classical_model_energies = np.log10(classical_model_energies)
 # prior = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False).cuda()
-# idxs = np.array(aligned_idxs)[~symmetry_change]
-# log_w_np = -classical_model_energies + as_numpy(prior.energy(torch.from_numpy(latent_np[idxs]).cuda())) + dlogp_np.reshape(-1,1)[idxs]
+# log_w_np = -classical_model_energies \
+#     + (prior.energy(torch.from_numpy(latent_np).cuda())).cpu().detach().numpy() \
+#     + dlogp_np.reshape(-1,1)
+
+# print("Plotting energy distribution...")
+# plt.figure(figsize=(16,9))
+# # plt.hist(classical_target_energies, bins=100, alpha=0.5, density=True, label="MD");
+# plt.hist(classical_model_energies, bins=100,alpha=0.5, range=(-50, 100), density=True, label="BG");
+# # plt.hist(classical_model_energies, bins=100,alpha=0.5, range=(-50, 100), density=True, label="BG weighted", weights=np.exp(log_w_np));
+# plt.legend(fontsize=25)
+# plt.xlabel("Energy in kbT", fontsize=25)  
+# plt.yticks(fontsize=20);
+# plt.title("Classical - Energy distribution", fontsize=45)
+# plt.show()
+# plt.savefig(f'./result_data/{args.file_name}-energy.png')  # Save the figure to a file
+# plt.close()
+# print("Done!")
