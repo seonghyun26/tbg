@@ -26,7 +26,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Sampling from TBG model')
     parser.add_argument('--file_name', type=str, default= "tbg-v1", help='Path to saved file')
     parser.add_argument('--state', type=str, default= "c5", help='Conditioning state')
-    parser.add_argument('--topology', type=str, default= "c5", help='State file name for topology')
+    parser.add_argument('--topology', type=str, default= "c5-tbg", help='State file name for topology')
     parser.add_argument('--scaling', type=int, default= "1", help='Scaling on data')
     return parser.parse_args()
 
@@ -114,9 +114,13 @@ symmetry_change = check_symmetry_change(model_samples, chirality_centers, refere
 print(f"Correct symmetry rate {(~symmetry_change).sum()/len(model_samples)}")
 
 
-traj_samples = md.Trajectory(as_numpy(model_samples)[~symmetry_change], topology=topology)
+# traj_samples = md.Trajectory(as_numpy(model_samples)[~symmetry_change], topology=topology)
+traj_samples = md.Trajectory(as_numpy(model_samples), topology=topology)
+print(traj_samples.xyz.shape)
 phis = md.compute_phi(traj_samples)[1].flatten()
 psis = md.compute_psi(traj_samples)[1].flatten()
+# print(phis)
+# print(psis)
 
 # # Plot Ramachandran plot
 plot_range = [-np.pi, np.pi]

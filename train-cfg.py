@@ -38,13 +38,20 @@ n_particles = 22
 n_dimensions = 3
 dim = n_particles * n_dimensions
 atom_types = np.arange(22)
-# atom_types[[1, 2, 3]] = 2
-atom_types[[0, 2, 3]] = 0
-atom_types[1] = 2
+# atom_types[[0, 2, 3]] = 0
+# atom_types[1] = 2
+atom_types[[1, 2, 3]] = 2
 atom_types[[11, 12, 13]] = 12
 atom_types[[19, 20, 21]] = 20
 h_initial = torch.nn.functional.one_hot(torch.tensor(atom_types))
 
+
+wandb.init(
+    project="tbg",
+    entity="eddy26",
+    config=vars(args),
+    tags=["cfg", "ECNF++"] + args.tags,
+)
 
 # Set saving configs
 kst = pytz.timezone('Asia/Seoul')
@@ -57,12 +64,7 @@ else:
     raise ValueError(f"Folder {PATH_last} already exists")
 
 # Set wandb configs
-wandb.init(
-    project="tbg",
-    entity="eddy26",
-    config=vars(args),
-    tags=["cfg", "ECNF++"] + args.tags,
-)
+
 
 
 prior = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False).cuda()

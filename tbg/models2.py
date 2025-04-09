@@ -1,8 +1,68 @@
 import torch
 import torch.nn as nn
+import time
 
 from tbg.gcl import E_GCL_vel, E_GCL, GCL
 from tbg.utils import remove_mean, remove_mean_with_mask
+
+import lightning
+from mlcolvar.cvs import BaseCV
+from mlcolvar.core import FeedForward, Normalization
+
+
+class TBGCV(BaseCV, lightning.LightningModule):
+    BLOCKS = ["norm_in", "encoder",]
+
+    def __init__(
+        self,
+        encoder_layers: list,
+        options: dict = None,
+        **kwargs,
+    ):
+        super().__init__(in_features=encoder_layers[0], out_features=encoder_layers[-1], **kwargs)
+        # ======= OPTIONS =======
+        options = self.parse_options(options)
+        self.cv_normalize = False
+        self.cv_min = 0
+        self.cv_max = 1
+        self.condition = False
+        
+        # ======= BLOCKS =======
+        # initialize norm_in
+        o = "norm_in"
+        if (options[o] is not False) and (options[o] is not None):
+            self.norm_in = Normalization(self.in_features, **options[o])
+
+        # initialize encoder
+        o = "encoder"
+        self.encoder = FeedForward(encoder_layers, **options[o])
+
+    def forward_cv(self, x: torch.Tensor) -> torch.Tensor:
+        """Evaluate the CV without pre or post/processing modules."""
+        if not self.condition:
+            return torch.zeros(x.shape[0], self.out_features).to(x.device)
+        
+        if self.norm_in is not None:
+            x = self.norm_in(x)
+        x = self.encoder(x)
+        
+        # if self.cv_normalize:
+        #     x = self._map_range(x)
+        
+        x = torch.nn.functional.normalize(x, p=2, dim=1)
+        return x
+
+    def set_cv_range(self, cv_min, cv_max, cv_std):
+        self.cv_normalize = True
+        self.cv_min = cv_min
+        self.cv_max = cv_max
+        self.cv_std = cv_std
+
+    def _map_range(self, x):
+        out_max = 1
+        out_min = -1
+        return (x - self.cv_min) * (out_max - out_min) / (self.cv_max - self.cv_min) + out_min
+
 
 
 class EGNN_dynamics(nn.Module):
@@ -401,9 +461,12 @@ class EGNN_dynamics_AD2_cat(nn.Module):
         if self.condition_time:
             h = torch.cat([h, t], dim=-1)
         if self.mode == 'egnn_dynamics':
+            # start_time = time.time()
             edge_attr = torch.sum((x[edges[0]] - x[edges[1]])**2, dim=1, keepdim=True)
             _, x_final = self.egnn(h, x, edges, edge_attr=edge_attr)
             vel = x_final - x
+            # end_time = time.time()
+            # print("EGNN time: ", end_time - start_time)
 
         else:
             raise NotImplemented()
@@ -438,6 +501,113 @@ class EGNN_dynamics_AD2_cat(nn.Module):
             self._edges_dict[n_batch] = [rows_total, cols_total]
         return self._edges_dict[n_batch]
 
+
+class EGNN_dynamics_AD2_cat_CV(nn.Module):
+    def __init__(
+            self, n_particles, n_dimension,h_initial, hidden_nf=64, device='cpu',
+            act_fn=torch.nn.SiLU(), n_layers=4, recurrent=True, attention=False,
+            condition_time=True, condition_cv=True, tanh=False, mode='egnn_dynamics', agg='sum'
+        ):
+        super().__init__()
+        self.mode = mode
+        self.h_initial = h_initial
+        self.condition_cv = condition_cv
+
+        # Add cv encoder for EGNN
+        encoder_layers = [45, 30, 30, 2]
+        cv_dimension = encoder_layers[-1]
+        self.cv = TBGCV(encoder_layers=encoder_layers).to(device)
+        self.cv.train()
+        print(self.cv)
+        
+        if mode == 'egnn_dynamics':
+            h_size = h_initial.size(1)
+            if condition_time:
+                h_size += 1
+            if condition_cv:
+                h_size += cv_dimension
+            
+            self.egnn = EGNN(in_node_nf=h_size, in_edge_nf=1, hidden_nf=hidden_nf, device=device, act_fn=act_fn, n_layers=n_layers, recurrent=recurrent, attention=attention, tanh=tanh, agg=agg)
+        else:
+            raise NotImplemented()
+
+        self.device = device
+        self._n_particles = n_particles
+        self._n_dimension = n_dimension
+        self.edges = self._create_edges()
+        self._edges_dict = {}
+        self.condition_time = condition_time
+        # Count function calls
+        self.counter = 0
+        
+
+    def forward(self, t, xs, cv_condition=None):
+
+        n_batch = xs.shape[0]
+        edges = self._cast_edges2batch(self.edges, n_batch, self._n_particles)
+        edges = [edges[0], edges[1]]
+        #Changed by Leon
+        x = xs.reshape(n_batch*self._n_particles, self._n_dimension).clone()
+        h = self.h_initial.to(self.device).reshape(1,-1)
+        h = h.repeat(n_batch, 1)
+        h = h.reshape(n_batch*self._n_particles, -1)
+        
+        # Concat cv condition to node features
+        cv_condition = self.cv.forward_cv(cv_condition)
+        cv_condition = cv_condition.repeat(self._n_particles, 1).reshape(n_batch * self._n_particles, -1)
+        h = torch.cat([h, cv_condition], dim=-1)
+        
+        # node compatability
+        # print(t.shape)
+        t = torch.as_tensor(t, device=xs.device)
+        if t.shape != (n_batch,1):
+            t = t.repeat(n_batch)
+        t = t.repeat(1, self._n_particles)
+        t = t.reshape(n_batch*self._n_particles, 1)
+        #print(t.shape, h.shape)
+        #print(t)
+        if self.condition_time:
+            h = torch.cat([h, t], dim=-1)
+        if self.mode == 'egnn_dynamics':
+            # start_time = time.time()
+            edge_attr = torch.sum((x[edges[0]] - x[edges[1]])**2, dim=1, keepdim=True)
+            _, x_final = self.egnn(h, x, edges, edge_attr=edge_attr)
+            vel = x_final - x
+            # end_time = time.time()
+            # print("EGNN time: ", end_time - start_time)
+
+        else:
+            raise NotImplemented()
+            
+        vel = vel.view(n_batch, self._n_particles, self._n_dimension)
+        vel = remove_mean(vel)
+        #print(t, xs)
+        self.counter += 1
+        return vel.view(n_batch,  self._n_particles* self._n_dimension)
+
+    def _create_edges(self):
+        rows, cols = [], []
+        for i in range(self._n_particles):
+            for j in range(i + 1, self._n_particles):
+                rows.append(i)
+                cols.append(j)
+                rows.append(j)
+                cols.append(i)
+        return [torch.LongTensor(rows), torch.LongTensor(cols)]
+
+    def _cast_edges2batch(self, edges, n_batch, n_nodes):
+        if n_batch not in self._edges_dict:
+            self._edges_dict = {}
+            rows, cols = edges
+            rows_total, cols_total = [], []
+            for i in range(n_batch):
+                rows_total.append(rows + i * n_nodes)
+                cols_total.append(cols + i * n_nodes)
+            rows_total = torch.cat(rows_total).to(self.device)
+            cols_total = torch.cat(cols_total).to(self.device)
+
+            self._edges_dict[n_batch] = [rows_total, cols_total]
+        return self._edges_dict[n_batch]
 
 class EGNN_dynamics_QM9(nn.Module):
     def __init__(self, in_node_nf, context_node_nf,

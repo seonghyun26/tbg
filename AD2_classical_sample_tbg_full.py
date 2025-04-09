@@ -3,35 +3,50 @@ import torch
 import wandb
 import numpy as np
 
+import argparse
+
 from bgflow.utils import as_numpy
 from bgflow import DiffEqFlow, BoltzmannGeneratorCV, MeanFreeNormalDistribution
 from bgflow import BlackBoxDynamics, BruteForceEstimator
 from tbg.models2 import EGNN_dynamics_AD2_cat
+from tbg.modelwithcv import EGNN_AD2_CV
 from bgflow import BlackBoxDynamics, BruteForceEstimator
 
 
-n_particles = 22
-n_dimensions = 3
-dim = n_particles * n_dimensions
+def parse_args():
+    parser = argparse.ArgumentParser(description='Sample from TBG')
+    parser.add_argument('--data_xyz_path', type=str, default= "../../simulation/dataset/alanine/300.0/timelag-10n-v1/xyz-tbg3.pt", help='Path to xyz data file')
+    parser.add_argument('--data_distance_path', type=str, default= "../../simulation/dataset/alanine/300.0/timelag-10n-v1/distance-tbg3.pt", help='Path to distance data file')
+    parser.add_argument('--filename', type=str, default= "tbgcv", help='checkpoint name')
+    parser.add_argument('--hidden_dim', type=int, default="64", help='hidden dimension of EGNN')
+    parser.add_argument('--state', type=str, default="c5", help='one state condition for sampling')
+    parser.add_argument('--n_samples', type=int, default= 400, help='number of samples')
+    parser.add_argument('--n_sample_batches', type=int, default= 500, help='number of samples batch')
+    parser.add_argument('--tags', nargs='*', help='Tags for Wandb')
+    
+    return parser.parse_args()
 
-scaling = 10
+args = parse_args()
+
 
 # atom types for backbone
 n_particles = 22
 n_dimensions = 3
 dim = n_particles * n_dimensions
+scaling = 10
 
 wandb.init(
     project="tbg",
     entity="eddy26",
+    tags=["original"] + args.tags,
 )
 
 atom_types = np.arange(22)
-atom_types[[1, 2, 3]] = 2
 # atom_types[[0, 2, 3]] = 0
 # atom_types[1] = 2
-atom_types[[19, 20, 21]] = 20
+atom_types[[1, 2, 3]] = 2
 atom_types[[11, 12, 13]] = 12
+atom_types[[19, 20, 21]] = 20
 h_initial = torch.nn.functional.one_hot(torch.tensor(atom_types))
 
 
@@ -40,6 +55,7 @@ prior = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False).cuda(
 prior_cpu = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False)
 
 brute_force_estimator = BruteForceEstimator()
+# net_dynamics = EGNN_AD2_CV(
 net_dynamics = EGNN_dynamics_AD2_cat(
     n_particles=n_particles,
     device="cuda",
@@ -55,7 +71,6 @@ net_dynamics = EGNN_dynamics_AD2_cat(
     mode="egnn_dynamics",
     agg="sum",
 )
-
 bb_dynamics = BlackBoxDynamics(
     dynamics_function=net_dynamics, divergence_estimator=brute_force_estimator
 )
@@ -70,7 +85,7 @@ class BruteForceEstimatorFast(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, dynamics, t, xs):
+    def forward(self, dynamics, t, xs, cv_condition = None):
 
         with torch.set_grad_enabled(True):
             xs.requires_grad_(True)
@@ -98,14 +113,15 @@ flow._kwargs = {}
 
 
 filename = "FM-AD2-train-repro-custom-data"
+# filename = "tbg-fixed6.pt"
 PATH_last = f"models/{filename}"
 checkpoint = torch.load(PATH_last)
 flow.load_state_dict(checkpoint["model_state_dict"])
 
 # n_samples = 400
 # n_sample_batches = 500
-n_samples = 200
-n_sample_batches = 400
+n_samples = args.n_samples
+n_sample_batches = args.n_sample_batches
 latent_np = np.empty(shape=(0))
 samples_np = np.empty(shape=(0))
 dlogp_np = np.empty(shape=(0))

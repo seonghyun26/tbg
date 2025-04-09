@@ -1,6 +1,6 @@
 cd ../
 
-CUDA_VISIBLE_DEVICES=$1 python sample-tbgcv.py \
+CUDA_VISIBLE_DEVICES=$1 python AD2_classical_sample_tbg_full.py \
     --tags sampling small \
     --hidden_dim 256 \
     --state c7ax \

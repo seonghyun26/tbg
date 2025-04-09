@@ -49,7 +49,7 @@ class TBGCV(BaseCV, lightning.LightningModule):
         # if self.cv_normalize:
         #     x = self._map_range(x)
         
-        x = torch.nn.functional.normalize(x, p=2, dim=1)
+        # x = torch.nn.functional.normalize(x, p=2, dim=1)
         return x
 
     def set_cv_range(self, cv_min, cv_max, cv_std):
@@ -144,19 +144,13 @@ class EGNN_dynamics(nn.Module):
 class EGNN_AD2_CV(nn.Module):
     def __init__(self, n_particles, n_dimension,h_initial, hidden_nf=64, device='cpu',
             act_fn=torch.nn.SiLU(), n_layers=4, recurrent=True, attention=False,
-                 condition_time=True, condition_cv=True, tanh=False, mode='egnn_dynamics', agg='sum'):
+                 condition_time=True, cv_dimension=0, tanh=False, mode='egnn_dynamics', agg='sum'):
         super().__init__()
         self.mode = mode
         self.device = device
         self._n_particles = n_particles
         self._n_dimension = n_dimension
-        
-        # Add cv representation, add it for the one hot encoding in h
-        encoder_layers = [45, 30, 30, 2]
-        cv_dimension = encoder_layers[-1]
-        self.cv = TBGCV(encoder_layers=encoder_layers).to(device)
-        self.cv.train()
-        print(self.cv)
+        self.cv_dimension = cv_dimension
         
         # Initial one hot encoding of the different element types
         self.h_initial = h_initial
@@ -165,8 +159,8 @@ class EGNN_AD2_CV(nn.Module):
             h_size = h_initial.size(1)
             if condition_time:
                 h_size += 1
-            if condition_cv:
-                h_size += cv_dimension
+            if cv_dimension:
+                h_size += self.cv_dimension
             
             self.egnn = EGNN(in_node_nf=h_size, in_edge_nf=1, hidden_nf=hidden_nf, device=device, act_fn=act_fn, n_layers=n_layers, recurrent=recurrent, attention=attention, tanh=tanh, agg=agg)
         else:
@@ -182,14 +176,6 @@ class EGNN_AD2_CV(nn.Module):
 
 
     def forward(self, t, xs, cv_condition=None):
-        # CV shape: batch_size * cv_dimension
-        if cv_condition is not None:
-            heavy_atom_distance = cv_condition
-        else:
-            heavy_atom_distance = xs[:, self._n_particles * 3:]
-        if heavy_atom_distance is not None:
-            cv = self.cv.forward_cv(heavy_atom_distance)
-
         # Batch
         xs = xs[:, :self._n_particles * 3]
         n_batch = xs.shape[0]
@@ -203,8 +189,9 @@ class EGNN_AD2_CV(nn.Module):
         h = h.repeat(n_batch, 1)
         h = h.reshape(n_batch * self._n_particles, -1)
         
-        cv_condition = cv.repeat(self._n_particles, 1).reshape(n_batch * self._n_particles, -1)
-        h = torch.cat([h, cv_condition], dim=-1)
+        if self.cv_dimension and cv_condition is not None:
+            cv_condition = cv_condition.repeat(self._n_particles, 1).reshape(n_batch * self._n_particles, -1)
+            h = torch.cat([h, cv_condition], dim=-1)
         
         # Time
         t = torch.as_tensor(t, device=xs.device)

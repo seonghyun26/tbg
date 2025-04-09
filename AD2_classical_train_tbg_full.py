@@ -1,7 +1,11 @@
+import os
+import pytz
 import torch
 import wandb
 import numpy as np
 import argparse
+
+from datetime import datetime
 
 from bgflow.utils import IndexBatchIterator
 from bgflow import DiffEqFlow, MeanFreeNormalDistribution
@@ -13,11 +17,23 @@ from tqdm import tqdm
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train TBG model')
-    parser.add_argument('--data_xyz_path', type=str, default= "../../simulation/dataset/alanine/300.0/timelag-10n-v1/xyz-tbg.pt", help='Path to xyz data file')
-
+    parser.add_argument('--data_xyz_path', type=str, default= "../../simulation/dataset/alanine/300.0/timelag-10n-v1/xyz-tbg2.pt", help='Path to xyz data file')
+    parser.add_argument('--data_distance_path', type=str, default= "../../simulation/dataset/alanine/300.0/timelag-10n-v1/distance-tbg.pt", help='Path to distance data file')
+    parser.add_argument('--condition_scaling', type=float, default="6", help='Scaling for conditioning')
+    parser.add_argument('--n_epochs', type=int, default="1000", help='Number of epochs to train')
+    parser.add_argument('--n_batch', type=int, default="256", help='Data batch size')
+    parser.add_argument('--sigma', type=float, default="0.01", help='Sigma value for CNF')
+    parser.add_argument('--hidden_dim', type=int, default="64", help='hidden dimension of EGNN')
+    parser.add_argument('--ckpt_name', type=str, default="ckpt", help='Checkpoint name')
+    parser.add_argument('--repro', type=bool, default=False, help='Reproduction settings')
+    parser.add_argument('--cfg', type=bool, default=False, help='CFG boolean flag')
+    parser.add_argument('--cfg_p', type=float, default=0.2, help='Threshold for CFG')
+    parser.add_argument('--tags', nargs='*', help='Tags for Wandb')
+    
     return parser.parse_args()
 
 args = parse_args()
+
 
 wandb.init(
     project="tbg",
@@ -25,14 +41,23 @@ wandb.init(
     config=vars(args),
     tags=["reproduce", "custom-data"]
 )
+kst = pytz.timezone('Asia/Seoul')
+now = datetime.now(kst)
+folder_name = now.strftime('%m%d-%H%M%S')
+PATH_last = f"models/repro/{folder_name}/"
+if not os.path.exists(PATH_last):
+    os.makedirs(PATH_last)
+else:
+    raise ValueError(f"Folder {PATH_last} already exists")
+
 
 # atom types for backbone
 n_particles = 22
 n_dimensions = 3
 dim = n_particles * n_dimensions
 atom_types = np.arange(22)
-# atom_types[[1, 2, 3]] = 2
-atom_types[[0, 2, 3]] = 1
+# atom_types[[0, 2, 3]] = 1
+atom_types[[1, 2, 3]] = 2
 atom_types[[19, 20, 21]] = 20
 atom_types[[11, 12, 13]] = 12
 h_initial = torch.nn.functional.one_hot(torch.tensor(atom_types))
@@ -47,7 +72,7 @@ net_dynamics = EGNN_dynamics_AD2_cat(
     device="cuda",
     n_dimension=dim // n_particles,
     h_initial=h_initial,
-    hidden_nf=64,
+    hidden_nf=args.hidden_dim,
     act_fn=torch.nn.SiLU(),
     n_layers=5,
     recurrent=True,
@@ -71,7 +96,6 @@ data_xyz = torch.load(args.data_xyz_path)[:, 0]
 batch_iter = IndexBatchIterator(len(data_xyz), n_batch)
 optim = torch.optim.Adam(flow.parameters(), lr=5e-4)
 n_epochs = 1000
-PATH_last = "models/FM-AD2-train-repro-custom-data"
 
 
 sigma = 0.01
@@ -107,16 +131,29 @@ for epoch in pbar:
     
     wandb.log({
         "loss": loss.item(),
+        "lr": optim.param_groups[0]["lr"],
     }, step=epoch)
     
-    if epoch and epoch % 200 == 0:
+    if epoch and epoch % 400 == 0:
         torch.save(
             {
                 "model_state_dict": flow.state_dict(),
                 "optimizer_state_dict": optim.state_dict(),
                 "epoch": epoch,
             },
-            PATH_last,
+            PATH_last + f"/tbg_{epoch}.pt",
         )
+
+print(f">> Final epoch {epoch}")
+torch.save(
+    {
+        "model_state_dict": flow.state_dict(),
+        "optimizer_state_dict": optim.state_dict(),
+        "epoch": epoch,
+    },
+    PATH_last + f"/tbg-{args.ckpt_name}.pt",
+)
+print(f"Model saved to {PATH_last}")
+wandb.save(PATH_last + f"/tbg-{args.ckpt_name}.pt")
 
 wandb.finish()
