@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument('--filename_tbg', type=str, default= "tbgcv", help='checkpoint name for tbg')
     parser.add_argument('--filename_mlcv', type=str, default= "mlcv", help='checkpoint name for mlcv')
     parser.add_argument('--hidden_dim', type=int, default="256", help='hidden dimension of EGNN')
+    parser.add_argument('--cv_dimension', type=int, default="2", help='cv dimension')
     parser.add_argument('--state', type=str, default="c5", help='one state condition for sampling')
     parser.add_argument('--n_samples', type=int, default= 40, help='number of samples')
     parser.add_argument('--n_sample_batches', type=int, default= 20, help='number of samples batch')
@@ -82,14 +83,14 @@ if not os.path.exists(f"result_data/{filename}/"):
 # Set up
 print(">> Setting up")
 if args.type == "cv-condition":
-    encoder_layers = [45, 30, 30, 2]
+    encoder_layers = [45, 30, 30, args.cv_dimension]
     cv_dimension = encoder_layers[-1]
     tbgcv = TBGCV(encoder_layers=encoder_layers).cuda()
     tbgcv.eval()
     tbgcv_ckpt = torch.load(f"models/{args.filename_mlcv}.pt")
     tbgcv.load_state_dict(tbgcv_ckpt)
 elif args.type == "label":
-    cv_dimension = 22
+    cv_dimension = args.cv_dimension
 else:
     cv_dimension = 0
 
@@ -179,8 +180,11 @@ for i in pbar:
         # print("Start sampling at {}")
         if args.type in ["repro"]:
             samples, latent, dlogp = bg.sample(n_samples, with_latent=True, with_dlogp=True)
+        elif args.type in ["label"]:
+            cv_condition = torch.ones((n_samples, cv_dimension)).cuda()
+            samples, latent, dlogp = bg.sample(n_samples, cv_condition=cv_condition, with_latent=True, with_dlogp=True)
         else:
-            cv_condition = bg.flow._dynamics._dynamics._dynamics_function.cv(state_heavy_atom_distance)
+            cv_condition = tbgcv(state_heavy_atom_distance)
             samples, latent, dlogp = bg.sample(n_samples, cv_condition=cv_condition, with_latent=True, with_dlogp=True)
         batch_end_time = time.time()
         pbar.set_description(f"Sampling from BG: {batch_end_time - batch_start_time:.2f} seconds")

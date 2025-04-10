@@ -18,6 +18,32 @@ from tqdm import tqdm
 from src.scheduler import CosineAnnealingWarmUpRestarts
 
 
+PHI_ANGLE = [4, 6, 8, 14]
+PSI_ANGLE = [6, 8, 14, 16]
+ALANINE_HEAVY_ATOM_IDX = [0, 4, 5, 6, 8, 10, 14, 15, 16, 18]
+
+
+def compute_dihedral(positions):
+    """http://stackoverflow.com/q/20305272/1128289"""
+    def dihedral(p):
+        if not isinstance(p, np.ndarray):
+            p = p.numpy()
+        b = p[:-1] - p[1:]
+        b[0] *= -1
+        v = np.array([v - (v.dot(b[1]) / b[1].dot(b[1])) * b[1] for v in [b[0], b[2]]])
+        
+        # Normalize vectors
+        v /= np.sqrt(np.einsum('...i,...i', v, v)).reshape(-1, 1)
+        b1 = b[1] / np.linalg.norm(b[1])
+        x = np.dot(v[0], v[1])
+        m = np.cross(v[0], b1)
+        y = np.dot(m, v[1])
+        
+        return np.arctan2(y, x)
+    
+    return np.array(list(map(dihedral, positions)))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train TBG model')
     parser.add_argument('--current_xyz', type=str, default= "../../simulation/dataset/alanine/300.0/tbg-10n/current-xyz.pt", help='Path to current xyz data file')
@@ -27,6 +53,7 @@ def parse_args():
     parser.add_argument('--n_batch', type=int, default="256", help='Data batch size')
     parser.add_argument('--sigma', type=float, default="0.00", help='Sigma value for CNF')
     parser.add_argument('--hidden_dim', type=int, default="64", help='hidden dimension of EGNN')
+    parser.add_argument('--cv_dimension', type=int, default="2", help='cv dimension')
     parser.add_argument('--type', type=str, default="cv-condition", help='training type')
     parser.add_argument('--cfg_p', type=float, default=0.2, help='Threshold for CFG')
     parser.add_argument('--ckpt_name', type=str, help='Checkpoint name')
@@ -72,12 +99,12 @@ print(f"Model will be saved to {PATH_last}")
 
 
 if args.type == "cv-condition":
-    encoder_layers = [45, 30, 30, 2]
+    encoder_layers = [45, 30, 30, args.cv_dimension]
     cv_dimension = encoder_layers[-1]
     tbgcv = TBGCV(encoder_layers=encoder_layers).cuda()
     tbgcv.train()
 elif args.type == "label":
-    cv_dimension = 22
+    cv_dimension = args.cv_dimension
 else:
     cv_dimension = 0
 

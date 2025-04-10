@@ -1,17 +1,10 @@
-import os
-import pytz
 import torch
-import wandb
 import numpy as np
-
-from tqdm.auto import tqdm
-from datetime import datetime
 
 from bgflow.utils import IndexBatchIterator
 from bgflow import DiffEqFlow, MeanFreeNormalDistribution
 from tbg.models2 import EGNN_dynamics_AD2_cat
 from bgflow import BlackBoxDynamics, BruteForceEstimator
-
 
 n_particles = 22
 n_dimensions = 3
@@ -21,21 +14,9 @@ dim = n_particles * n_dimensions
 # atom types for backbone
 atom_types = np.arange(22)
 atom_types[[1, 2, 3]] = 2
-atom_types[[11, 12, 13]] = 12
 atom_types[[19, 20, 21]] = 20
+atom_types[[11, 12, 13]] = 12
 h_initial = torch.nn.functional.one_hot(torch.tensor(atom_types))
-
-wandb.init(
-    project="tbg",
-    entity="eddy26",
-    tags=["repro"],
-)
-kst = pytz.timezone('Asia/Seoul')
-now = datetime.now(kst)
-folder_name = now.strftime('%m%d-%H%M%S')
-PATH_last = f"models/repro-v3/{folder_name}"
-if not os.path.exists(PATH_last):
-    os.makedirs(PATH_last)
 
 
 # now set up a prior
@@ -67,26 +48,27 @@ flow = DiffEqFlow(dynamics=bb_dynamics)
 
 
 n_batch = 256
-# data_path = "data/AD2/AD2_weighted.npy"
-# data_smaller = torch.from_numpy(np.load(data_path)).float()
-data_xyz = torch.load("../../simulation/dataset/alanine/300.0/tbg-10n/current-xyz.pt").cuda()
-batch_iter = IndexBatchIterator(len(data_xyz), n_batch)
-optim = torch.optim.Adam(flow.parameters(), lr=5e-4)
-n_epochs = 1000
-sigma = 0.01
-epoch_loss = torch.tensor(0.0).cuda()
+data_path = "data/AD2/AD2_weighted.npy"
+data_smaller = torch.from_numpy(np.load(data_path)).float()
+batch_iter = IndexBatchIterator(len(data_smaller), n_batch)
 
-pbar = tqdm(range(n_epochs), desc = f"Loss: {epoch_loss:.4f}",)
+optim = torch.optim.Adam(flow.parameters(), lr=5e-4)
+
+n_epochs = 1000
+
+PATH_last = "models/Flow-Matching-AD2-amber-weighted-encoding"
+
+
+sigma = 0.01
 for epoch in range(n_epochs):
     if epoch == 500:
         for g in optim.param_groups:
             g["lr"] = 5e-5
-    loss_list = []
-    
+
     for it, idx in enumerate(batch_iter):
         optim.zero_grad()
 
-        x1 = data_xyz[idx].cuda()
+        x1 = data_smaller[idx].cuda()
         batchsize = x1.shape[0]
 
         t = torch.rand(batchsize, 1).cuda()
@@ -102,16 +84,7 @@ for epoch in range(n_epochs):
         loss = torch.mean((vt - ut) ** 2)
         loss.backward()
         optim.step()
-        loss_list.append(loss.item())
-        
-    epoch_loss = np.mean(loss_list)
-    pbar.set_description(f"Loss: {epoch_loss:.4f}")
-    pbar.update(1)
-    wandb.log({
-        "loss": epoch_loss,
-    }, step=epoch)    
-    
-    if epoch > 0 and epoch % 400 == 0:
+    if epoch % 100 == 0:
         print(epoch)
         torch.save(
             {
@@ -119,15 +92,5 @@ for epoch in range(n_epochs):
                 "optimizer_state_dict": optim.state_dict(),
                 "epoch": epoch,
             },
-            PATH_last + f"/{epoch}.pt",
+            PATH_last,
         )
-        
-
-torch.save(
-    {
-        "model_state_dict": flow.state_dict(),
-        "optimizer_state_dict": optim.state_dict(),
-        "epoch": epoch,
-    },
-    PATH_last + "/tbg.pt",
-)

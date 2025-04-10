@@ -22,6 +22,33 @@ import networkx.algorithms.isomorphism as iso
 import networkx as nx
 from networkx import isomorphism
 
+
+PHI_ANGLE = [4, 6, 8, 14]
+PSI_ANGLE = [6, 8, 14, 16]
+ALANINE_HEAVY_ATOM_IDX = [0, 4, 5, 6, 8, 10, 14, 15, 16, 18]
+
+
+def compute_dihedral(positions):
+    """http://stackoverflow.com/q/20305272/1128289"""
+    def dihedral(p):
+        if not isinstance(p, np.ndarray):
+            p = p.numpy()
+        b = p[:-1] - p[1:]
+        b[0] *= -1
+        v = np.array([v - (v.dot(b[1]) / b[1].dot(b[1])) * b[1] for v in [b[0], b[2]]])
+        
+        # Normalize vectors
+        v /= np.sqrt(np.einsum('...i,...i', v, v)).reshape(-1, 1)
+        b1 = b[1] / np.linalg.norm(b[1])
+        x = np.dot(v[0], v[1])
+        m = np.cross(v[0], b1)
+        y = np.dot(m, v[1])
+        
+        return np.arctan2(y, x)
+    
+    return np.array(list(map(dihedral, positions)))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Sampling from TBG model')
     parser.add_argument('--file_name', type=str, default= "tbg-v1", help='Path to saved file')
@@ -100,9 +127,7 @@ print(f"Aligned samples shape: {aligned_samples.shape}")
 
 
 
-traj_samples = md.Trajectory(aligned_samples/scaling, topology=topology)
-phis = md.compute_phi(traj_samples)[1].flatten()
-psis = md.compute_psi(traj_samples)[1].flatten()
+traj_samples = md.Trajectory(aligned_samples, topology=topology)
 sample_for_chirality = md.load(topology_file).xyz
 chirality_sample_c5 = torch.from_numpy(sample_for_chirality)
 model_samples = torch.from_numpy(traj_samples.xyz)
@@ -114,11 +139,13 @@ symmetry_change = check_symmetry_change(model_samples, chirality_centers, refere
 print(f"Correct symmetry rate {(~symmetry_change).sum()/len(model_samples)}")
 
 
-# traj_samples = md.Trajectory(as_numpy(model_samples)[~symmetry_change], topology=topology)
-traj_samples = md.Trajectory(as_numpy(model_samples), topology=topology)
+traj_samples = md.Trajectory(as_numpy(model_samples)[~symmetry_change], topology=topology)
+# traj_samples = md.Trajectory(as_numpy(model_samples), topology=topology)
 print(traj_samples.xyz.shape)
-phis = md.compute_phi(traj_samples)[1].flatten()
-psis = md.compute_psi(traj_samples)[1].flatten()
+# phis = md.compute_phi(traj_samples)[1].flatten()
+# psis = md.compute_psi(traj_samples)[1].flatten()
+phis = compute_dihedral(traj_samples.xyz[:, PHI_ANGLE])
+psis = compute_dihedral(traj_samples.xyz[:, PSI_ANGLE])
 # print(phis)
 # print(psis)
 
