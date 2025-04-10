@@ -1,14 +1,12 @@
 import os
-import pytz
+import json
 import torch
 import wandb
 import numpy as np
 import argparse
 
-from datetime import datetime
-
 from bgflow.utils import IndexBatchIterator
-from bgflow import DiffEqFlow, BoltzmannGeneratorCV, MeanFreeNormalDistribution
+from bgflow import DiffEqFlow, MeanFreeNormalDistribution
 from tbg.modelwithcv import EGNN_AD2_CV, TBGCV
 from bgflow import BlackBoxDynamics, BruteForceEstimator
 
@@ -46,6 +44,7 @@ def compute_dihedral(positions):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train TBG model')
+    parser.add_argument('--date', type=str, default= "debug", help='Date for the experiment')
     parser.add_argument('--current_xyz', type=str, default= "../../simulation/dataset/alanine/300.0/tbg-10n/current-xyz.pt", help='Path to current xyz data file')
     parser.add_argument('--timelag_xyz', type=str, default= "../../simulation/dataset/alanine/300.0/tbg-10n/timelag-xyz.pt", help='Path to timelag xyz data file')
     parser.add_argument('--current_distance', type=str, default= "../../simulation/dataset/alanine/300.0/tbg-10n/current-distance.pt", help='Path to current distance data file')
@@ -56,7 +55,6 @@ def parse_args():
     parser.add_argument('--cv_dimension', type=int, default="2", help='cv dimension')
     parser.add_argument('--type', type=str, default="cv-condition", help='training type')
     parser.add_argument('--cfg_p', type=float, default=0.2, help='Threshold for CFG')
-    parser.add_argument('--ckpt_name', type=str, help='Checkpoint name')
     parser.add_argument('--tags', nargs='*', help='Tags for Wandb')
     parser.add_argument('--cv_condition_scale', type=float, default="6", help='Scaling for cv condition')
     
@@ -80,23 +78,14 @@ wandb.init(
     config=vars(args),
     tags=["condition", "ECNF++"] + args.tags,
 )
-kst = pytz.timezone('Asia/Seoul')
-now = datetime.now(kst)
-folder_name = now.strftime('%m%d-%H%M%S')
-if args.type in ["repro", "label"]:
-    PATH_last = f"models/tbgcv-repro/{folder_name}/"
-elif args.type == "cfg":
-    PATH_last = f"models/tbgcv-cfg/{folder_name}/"
-elif args.type == "cv-condition":
-    PATH_last = f"models/tbgcv/{folder_name}/"
-else:
-    raise ValueError(f"Unknown training type {args.type}")
-if not os.path.exists(PATH_last):
-    os.makedirs(PATH_last)
-else:
-    raise ValueError(f"Folder {PATH_last} already exists")
-print(f"Model will be saved to {PATH_last}")
-
+save_dir = f"res/{args.date}/model"
+if not os.path.exists(save_dir):
+    os.makedirs(save_dir)
+print(f"Model will be saved to {save_dir}")
+json.dump(
+    vars(args),
+    open(save_dir + "/args.json", "w"),
+)
 
 if args.type == "cv-condition":
     encoder_layers = [45, 30, 30, args.cv_dimension]
@@ -153,9 +142,6 @@ for epoch in pbar:
 
         # Load data
         x1_current = data_current_xyz[idx]
-        x1_timelag = data_timelag_xyz[idx]
-        x1_label = data_label[idx]
-        x1_distance = data_current_distance[idx]
         batchsize = x1_current.shape[0]
         
         # type
@@ -164,13 +150,18 @@ for epoch in pbar:
             cv_condition = None
         elif args.type == "label":
             x1 = x1_current
+            x1_label = data_label[idx]
             cv_condition = x1_label.unsqueeze(1).repeat(1, cv_dimension)
         elif args.type == "cfg":
+            x1_timelag = data_timelag_xyz[idx]
+            x1_distance = data_current_distance[idx]
             uncond_mask = torch.rand(batchsize).cuda() < args.cfg_p
             x1 = torch.where(uncond_mask[:, None], x1_current, x1_timelag)
             cv_condition = tbgcv(x1_distance)
             cv_condition = torch.where(uncond_mask[:, None], torch.zeros_like(cv_condition), cv_condition)
         elif args.type == "cv-condition":
+            x1_timelag = data_timelag_xyz[idx]
+            x1_distance = data_current_distance[idx]
             x1 = x1_timelag
             cv_condition = tbgcv(x1_distance)
         else:
@@ -209,12 +200,12 @@ for epoch in pbar:
                 "optimizer_state_dict": optim.state_dict(),
                 "epoch": epoch,
             },
-            PATH_last + f"/tbg_{epoch}.pt",
+            save_dir + f"/tbg-{epoch}.pt",
         )
         if args.type not in ["repro", "label"]:    
             torch.save(
                 tbgcv.state_dict(),
-                PATH_last + f"/mlcv_{epoch}.pt",   
+                save_dir + f"/mlcv-{epoch}.pt",   
             )
         
 print(f">> Final epoch {epoch}")
@@ -224,16 +215,16 @@ torch.save(
         "optimizer_state_dict": optim.state_dict(),
         "epoch": epoch,
     },
-    PATH_last + f"/tbg-{args.ckpt_name}.pt",
+    save_dir + f"/tbg-final.pt",
 )
-wandb.save(PATH_last + f"/tbg-{args.ckpt_name}.pt")
+wandb.save(save_dir + f"/tbg-final.pt")
 
 if args.type not in ["repro", "label"]:
     torch.save(
         tbgcv.state_dict(),
-        PATH_last + f"/mlcv-{args.ckpt_name}.pt",   
+        save_dir + f"/mlcv-final.pt",   
     )
-    wandb.save(PATH_last + f"/mlcv-{args.ckpt_name}.pt")
-print(f"Model saved to {PATH_last}")
+    wandb.save(save_dir + f"/mlcv-final.pt")
+print(f"Model saved to {save_dir}")
 
 wandb.finish()

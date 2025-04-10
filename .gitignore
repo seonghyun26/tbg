@@ -2,6 +2,7 @@ AImplicitUnconstrained/*
 result_data/*
 models/*
 wandb/*
+res/* 
 
 **__pycache__**
 

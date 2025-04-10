@@ -39,9 +39,8 @@ def coordinate2distance(
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Sample from TBG')
-    parser.add_argument('--filename_tbg', type=str, default= "tbgcv", help='checkpoint name for tbg')
-    parser.add_argument('--filename_mlcv', type=str, default= "mlcv", help='checkpoint name for mlcv')
-    parser.add_argument('--hidden_dim', type=int, default="256", help='hidden dimension of EGNN')
+    parser.add_argument('--date', type=str, default= "debug", help='Date for the experiment')
+    parser.add_argument('--hidden_dim', type=int, default="64", help='hidden dimension of EGNN')
     parser.add_argument('--cv_dimension', type=int, default="2", help='cv dimension')
     parser.add_argument('--state', type=str, default="c5", help='one state condition for sampling')
     parser.add_argument('--n_samples', type=int, default= 40, help='number of samples')
@@ -74,10 +73,11 @@ wandb.init(
     tags=["condition", "ECNF++"] + args.tags,
 )
 filename = args.filename_tbg
-PATH_last = f"models/{filename}.pt"
-checkpoint = torch.load(PATH_last)
-if not os.path.exists(f"result_data/{filename}/"):
-    os.makedirs(f"result_data/{filename}/")
+load_dir = f"res/{args.date}/model"
+checkpoint = torch.load(load_dir+"/tbg-final.pt")
+save_dir = f"res/{args.date}/result"
+if not os.path.exists(save_dir):
+    os.makedirs(save_dir)
 
 
 # Set up
@@ -148,7 +148,7 @@ total_start_time = time.time()
 
 
 # Conditioning
-if args.state in ["c5", "c7ax"]:
+if args.type == "cv-condition" and args.state in ["c5", "c7ax"]:
     state_path = f"../../simulation/data/alanine/{args.state}-tbg.pt"
     state_xyz = torch.load(state_path)['xyz']
     state_xyz = (state_xyz - 1.5508) / 0.6695
@@ -156,16 +156,23 @@ if args.state in ["c5", "c7ax"]:
     state_heavy_atom_distance = state_heavy_atom_distance.repeat(n_samples, 1)
 elif args.state == "none":
     state_heavy_atom_distance = None
-else:
-    data_xyz_path = args.data_xyz_path
-    data_xyz = torch.load(data_xyz_path)
-    data_distance_path = args.data_distance_path
-    data_distance = torch.load(data_distance_path)
-    batch_iter = IndexBatchIterator(len(data_xyz), n_samples)
-    rmsd = []
-    heavy_atom_distance_avg = []
-    heavy_atom_distance_difference = []
-    mse = torch.nn.MSELoss()
+# else:
+#     data_xyz_path = args.data_xyz_path
+#     data_xyz = torch.load(data_xyz_path)
+#     data_distance_path = args.data_distance_path
+#     data_distance = torch.load(data_distance_path)
+#     batch_iter = IndexBatchIterator(len(data_xyz), n_samples)
+#     rmsd = []
+#     heavy_atom_distance_avg = []
+#     heavy_atom_distance_difference = []
+#     mse = torch.nn.MSELoss()
+if args.type == "label":
+    if args.state == "c5":
+        cv_condition = torch.ones((n_samples, cv_dimension)).cuda()
+    elif args.state == "c7ax":
+        cv_condition = torch.zeros((n_samples, cv_dimension)).cuda()
+    else:
+        raise ValueError("Invalid state for label condition")
 
 
 
@@ -181,7 +188,6 @@ for i in pbar:
         if args.type in ["repro"]:
             samples, latent, dlogp = bg.sample(n_samples, with_latent=True, with_dlogp=True)
         elif args.type in ["label"]:
-            cv_condition = torch.ones((n_samples, cv_dimension)).cuda()
             samples, latent, dlogp = bg.sample(n_samples, cv_condition=cv_condition, with_latent=True, with_dlogp=True)
         else:
             cv_condition = tbgcv(state_heavy_atom_distance)
@@ -194,9 +200,9 @@ for i in pbar:
         dlogp_torch[i * n_samples : (i + 1) * n_samples, :] = dlogp
         
         
-        torch.save(latent_torch, f"result_data/{filename}/latent-{args.state}.pt")
-        torch.save(samples_torch, f"result_data/{filename}/samples-{args.state}.pt")
-        torch.save(dlogp_torch, f"result_data/{filename}/dlogp-{args.state}.pt")
+        torch.save(latent_torch, f"{save_dir}/latent-{args.state}.pt")
+        torch.save(samples_torch, f"{save_dir}/samples-{args.state}.pt")
+        torch.save(dlogp_torch, f"{save_dir}/dlogp-{args.state}.pt")
 
 # Original numpy concat sampling
 # print(f"Start sampling with {filename}")
