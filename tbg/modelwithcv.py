@@ -190,8 +190,8 @@ class EGNN_AD2_CV(nn.Module):
         h = h.reshape(n_batch * self._n_particles, -1)
         
         if self.cv_dimension and cv_condition is not None:
-            cv_condition = cv_condition.repeat(self._n_particles, 1).reshape(n_batch * self._n_particles, -1)
-            h = torch.cat([h, cv_condition], dim=-1)
+            cv_condition_molecule = cv_condition.repeat_interleave(self._n_particles, dim=0)
+            h = torch.cat([h, cv_condition_molecule], dim=1)
         
         # Time
         t = torch.as_tensor(t, device=xs.device)

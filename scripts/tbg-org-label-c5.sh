@@ -2,26 +2,26 @@ cd ../
 
 export TZ=Asia/Seoul
 CURRENT_DATE=$(date '+%m%d_%H%M%S')
-# CURRENT_DATE=0411_024308
+# CURRENT_DATE=0411_192901
 echo $CURRENT_DATE
 
 CUDA_VISIBLE_DEVICES=$1 python train.py \
     --date $CURRENT_DATE \
-    --type label \
-    --cv_dimension 1 \
-    --tags training data-normalization org-label
+    --type cv-condition \
+    --cv_dimension 2 \
+    --tags training data-normalization cv-condition
 
 CUDA_VISIBLE_DEVICES=$1 python sample.py \
     --date $CURRENT_DATE \
     --type label \
-    --tags sampling data-normalization org-label \
-    --cv_dimension 1 \
+    --tags sampling data-normalization cv-condition \
+    --cv_dimension 2 \
     --state c5 \
-    --n_samples 100 \
-    --n_sample_batches 10
+    --n_samples 200 \
+    --n_sample_batches 20
 
 CUDA_VISIBLE_DEVICES=$1 python eval.py \
     --date $CURRENT_DATE \
-    --scaling 10 \
+    --scaling 1.4936519791 \
     --state c5 \
     --topology c5-tbg.pdb
