@@ -72,10 +72,9 @@ wandb.init(
     config=vars(args),
     tags=["condition", "ECNF++"] + args.tags,
 )
-filename = args.filename_tbg
-load_dir = f"res/{args.date}/model"
+load_dir = f"./res/{args.date}/model"
 checkpoint = torch.load(load_dir+"/tbg-final.pt")
-save_dir = f"res/{args.date}/result"
+save_dir = f"./res/{args.date}/result"
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
@@ -87,7 +86,8 @@ if args.type == "cv-condition":
     cv_dimension = encoder_layers[-1]
     tbgcv = TBGCV(encoder_layers=encoder_layers).cuda()
     tbgcv.eval()
-    tbgcv_ckpt = torch.load(f"models/{args.filename_mlcv}.pt")
+    raise NotImplementedError("TBGCV is not implemented yet")
+    # tbgcv_ckpt = torch.load(f"models/{args.filename_mlcv}.pt")
     tbgcv.load_state_dict(tbgcv_ckpt)
 elif args.type == "label":
     cv_dimension = args.cv_dimension
@@ -135,7 +135,7 @@ flow._kwargs = {}
     
 
 # Sampling ready
-print(f">> Sampling with {filename} for {args.state}")
+print(f">> Sampling")
 n_samples = args.n_samples
 n_sample_batches = args.n_sample_batches
 # latent_np = np.empty(shape=(0))
@@ -199,7 +199,7 @@ for i in pbar:
         samples_torch[i * n_samples : (i + 1) * n_samples, :] = samples
         dlogp_torch[i * n_samples : (i + 1) * n_samples, :] = dlogp
         
-        
+    if i % 10 == 0:    
         torch.save(latent_torch, f"{save_dir}/latent-{args.state}.pt")
         torch.save(samples_torch, f"{save_dir}/samples-{args.state}.pt")
         torch.save(dlogp_torch, f"{save_dir}/dlogp-{args.state}.pt")
@@ -254,10 +254,10 @@ for i in pbar:
 
 
 # Save final results
-print(f"Saved data at result_data/{filename}/")
-torch.save(latent_torch, f"result_data/{filename}/latent-{args.state}.pt")
-torch.save(samples_torch, f"result_data/{filename}/samples-{args.state}.pt")
-torch.save(dlogp_torch, f"result_data/{filename}/dlogp-{args.state}.pt")
+print(f"Saved data at {save_dir}")
+torch.save(latent_torch, f"{save_dir}/latent-{args.state}.pt")
+torch.save(samples_torch, f"{save_dir}/samples-{args.state}.pt")
+torch.save(dlogp_torch, f"{save_dir}/dlogp-{args.state}.pt")
 
 total_end_time = time.time()
 print(f"Total sampling time: {total_end_time - total_start_time:.2f} seconds")

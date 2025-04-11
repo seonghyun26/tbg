@@ -45,9 +45,9 @@ def compute_dihedral(positions):
 def parse_args():
     parser = argparse.ArgumentParser(description='Train TBG model')
     parser.add_argument('--date', type=str, default= "debug", help='Date for the experiment')
-    parser.add_argument('--current_xyz', type=str, default= "../../simulation/dataset/alanine/300.0/tbg-10n/current-xyz.pt", help='Path to current xyz data file')
-    parser.add_argument('--timelag_xyz', type=str, default= "../../simulation/dataset/alanine/300.0/tbg-10n/timelag-xyz.pt", help='Path to timelag xyz data file')
-    parser.add_argument('--current_distance', type=str, default= "../../simulation/dataset/alanine/300.0/tbg-10n/current-distance.pt", help='Path to current distance data file')
+    parser.add_argument('--current_xyz', type=str, default= "../../simulation/dataset/alanine/300.0/tbg-10n-v2/current-xyz.pt", help='Path to current xyz data file')
+    parser.add_argument('--timelag_xyz', type=str, default= "../../simulation/dataset/alanine/300.0/tbg-10n-v2/timelag-xyz.pt", help='Path to timelag xyz data file')
+    parser.add_argument('--current_distance', type=str, default= "../../simulation/dataset/alanine/300.0/tbg-10n-v2/current-distance.pt", help='Path to current distance data file')
     parser.add_argument('--n_epochs', type=int, default="1000", help='Number of epochs to train')
     parser.add_argument('--n_batch', type=int, default="256", help='Data batch size')
     parser.add_argument('--sigma', type=float, default="0.00", help='Sigma value for CNF')
@@ -56,7 +56,6 @@ def parse_args():
     parser.add_argument('--type', type=str, default="cv-condition", help='training type')
     parser.add_argument('--cfg_p', type=float, default=0.2, help='Threshold for CFG')
     parser.add_argument('--tags', nargs='*', help='Tags for Wandb')
-    parser.add_argument('--cv_condition_scale', type=float, default="6", help='Scaling for cv condition')
     
     return parser.parse_args()
 
@@ -124,10 +123,12 @@ flow = DiffEqFlow(dynamics=bb_dynamics)
 
 
 # Load dataset, set up optimizer
-data_current_xyz = torch.load(args.current_xyz).cuda()
+data_original_xyz = torch.load("./data/AD2/AD2_weighted.pt").cuda()
+data_original_label = torch.load("./data/AD2/AD2_label.pt").cuda()
+data_current_xyz = torch.load(args.current_xyz).cuda().reshape(-1, 22 * 3)
 data_timelag_xyz = torch.load(args.timelag_xyz).cuda()
 data_current_distance = torch.load(args.current_distance).cuda()
-data_label = torch.load("../../simulation/dataset/alanine/300.0/tbg-10n/current-label.pt").cuda()
+data_label = torch.load("../../simulation/dataset/alanine/300.0/tbg-10n-v2/current-label.pt").cuda()
 batch_iter = IndexBatchIterator(len(data_current_xyz), args.n_batch)
 optim = torch.optim.AdamW(flow.parameters(), lr=1e-6, weight_decay=1e-3)
 scheduler = CosineAnnealingWarmUpRestarts(optim, T_0=args.n_epochs, T_up=50, eta_max=5e-4, gamma=0.5)

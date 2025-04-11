@@ -1,3 +1,4 @@
+import os
 import torch
 import scipy
 import numpy as np
@@ -68,7 +69,7 @@ dim = n_particles * n_dimensions
 save_dir = f"./res/{args.date}"
 
 
-def align_topology(sample, reference, scaling=scaling):
+def align_topology(sample, reference, scaling=1):
     sample = sample.reshape(-1, 3)
     all_dists = scipy.spatial.distance.cdist(sample, sample)
     adj_list_computed = create_adjacency_list(all_dists/scaling, atom_types)
@@ -98,16 +99,17 @@ dataset = AImplicitUnconstrained(root=os.getcwd()+"/../tbg/", read=True, downloa
 data = dataset.xyz
 target = dataset.get_energy_model()
 data_energies = target.energy(torch.from_numpy(dataset.xyz[::10].reshape(-1,66)))
-latent_np = torch.load(f"./result_data/{args.file_name}/latent-{args.state}.pt").cpu().detach().numpy()
-samples_np = torch.load(f"./result_data/{args.file_name}/samples-{args.state}.pt").cpu().detach().numpy()
-dlogp_np = torch.load(f"./result_data/{args.file_name}/dlogp-{args.state}.pt").cpu().detach().numpy()
+latent_np = torch.load(f"./res/{args.date}/result/latent-{args.state}.pt").cpu().detach().numpy()
+samples_np = torch.load(f"./res/{args.date}/result/samples-{args.state}.pt").cpu().detach().numpy()
+dlogp_np = torch.load(f"./res/{args.date}/result/dlogp-{args.state}.pt").cpu().detach().numpy()
 
 
 print("Aligning samples")
 aligned_samples = []
 aligned_idxs = []
 atom_dict = {"C": 0, "H":1, "N":2, "O":3}
-topology = dataset.system.mdtraj_topology
+# topology = dataset.system.mdtraj_topology
+topology = md.load(f"data/AD2/c5-tbg.pdb").topology
 atom_types = []
 for atom_name in topology.atoms:
     atom_types.append(atom_name.name[0])
@@ -115,16 +117,14 @@ atom_types = torch.from_numpy(np.array([atom_dict[atom_type] for atom_type in at
 adj_list = torch.from_numpy(np.array([(b.atom1.index, b.atom2.index) for b in topology.bonds], dtype=np.int32))
 pbar = tqdm(
     samples_np.reshape(-1,dim//3, 3),
-    desc = f"Aligned samples 0",
-    total=len(samples_np),
+    desc = f"Aligned samples 0"
 )
 for i, sample in enumerate(pbar):   
-    aligned_sample, is_isomorphic = align_topology(sample, as_numpy(adj_list).tolist())
+    aligned_sample, is_isomorphic = align_topology(sample, as_numpy(adj_list).tolist(), scaling = scaling)
     if is_isomorphic:
         aligned_samples.append(aligned_sample)
         aligned_idxs.append(i)
     pbar.set_description(f"Aligned samples {len(aligned_samples)}")
-    pbar.update(1)
 aligned_samples = np.array(aligned_samples)
 aligned_samples.shape
 print(f"Correct configuration rate {len(aligned_samples)/len(samples_np)}")
@@ -135,8 +135,6 @@ if len(aligned_samples) == 0:
 # Process chirality
 print(">> Processing chirality")
 traj_samples = md.Trajectory(aligned_samples/scaling, topology=topology)
-phis = md.compute_phi(traj_samples)[1].flatten()
-psis = md.compute_psi(traj_samples)[1].flatten()
 model_samples = torch.from_numpy(traj_samples.xyz)
 chirality_centers = find_chirality_centers(adj_list, atom_types)
 reference_signs = compute_chirality_sign(torch.from_numpy(data.reshape(-1, dim//3, 3))[[1]], chirality_centers)
@@ -145,7 +143,8 @@ model_samples[symmetry_change] *=-1
 symmetry_change = check_symmetry_change(model_samples, chirality_centers, reference_signs)
 print(f"Correct symmetry rate {(~symmetry_change).sum()/len(model_samples)}")
 traj_samples = md.Trajectory(as_numpy(model_samples)[~symmetry_change], topology=topology)
-
+phis = md.compute_phi(traj_samples)[1].flatten()
+psis = md.compute_psi(traj_samples)[1].flatten()
 
 
 # Plot Ramachandran plot
@@ -162,7 +161,8 @@ cbar = fig.colorbar(im, ticks=ticks)
 cbar.ax.set_yticklabels([6.0,4.0,2.0,0.0], fontsize=25)
 cbar.ax.invert_yaxis()
 cbar.ax.set_ylabel(r"Free energy / $k_B T$", fontsize=35)
-fig.savefig(f"{save_dir}/ram.png")
+fig.savefig(f"{save_dir}/{args.state}-ram.png")
+print(f"Ramachandran plot saved at {save_dir}/{args.state}-ram.png")
 
 
 
@@ -174,7 +174,7 @@ prior = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False).cuda(
 idxs = np.array(aligned_idxs)[~symmetry_change]
 log_w_np = -classical_model_energies + as_numpy(prior.energy(torch.from_numpy(latent_np[idxs]).cuda())) + dlogp_np.reshape(-1,1)[idxs]
 np.save("classical_target_energies.npy", classical_target_energies)
-print("Plotting energy distribution")
+print(">>Plotting energy distribution")
 fig = plt.figure(figsize=(16, 9))
 plt.hist(classical_target_energies, bins=100, alpha=0.5, range=(-50,100), density=True, label="MD")
 plt.hist(classical_model_energies, bins=100,alpha=0.5, range=(-50,100), density=True, label="BG")
@@ -184,6 +184,7 @@ plt.yticks(fontsize=20)
 plt.legend(fontsize=20)
 plt.xlabel("Energy in kbT", fontsize=20) 
 plt.title("Classical - Energy distribution", fontsize=25)
-fig.savefig(f"{save_dir}/energy_distribution.png")
+fig.savefig(f"{save_dir}/{args.state}-energy_distribution.png")
+print(f"Energy distribution saved at {save_dir}/{args.state}-energy_distribution.png")
 
 exit(0)

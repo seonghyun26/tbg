@@ -105,7 +105,7 @@ class EGNN_dynamics(nn.Module):
         elif self.mode == 'gnn_dynamics':
             h = torch.cat([h, x], dim=1)
             vel = self.gnn(h, edges)
-
+        
         vel = vel.view(n_batch, self._n_particles, self._n_dimension)
         vel = remove_mean(vel)
         #Changed by Leon
@@ -553,7 +553,6 @@ class EGNN_dynamics_AD2_cat_CV(nn.Module):
         h = h.reshape(n_batch*self._n_particles, -1)
         
         # Concat cv condition to node features
-        cv_condition = self.cv.forward_cv(cv_condition)
         cv_condition = cv_condition.repeat(self._n_particles, 1).reshape(n_batch * self._n_particles, -1)
         h = torch.cat([h, cv_condition], dim=-1)
         

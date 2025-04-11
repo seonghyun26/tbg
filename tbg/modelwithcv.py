@@ -210,7 +210,9 @@ class EGNN_AD2_CV(nn.Module):
 
         else:
             raise NotImplemented()
-            
+        
+        
+        
         vel = vel.view(n_batch, self._n_particles, self._n_dimension)
         vel = remove_mean(vel)
         
