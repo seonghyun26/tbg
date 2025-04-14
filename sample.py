@@ -10,7 +10,8 @@ import argparse
 from bgflow.utils import as_numpy, IndexBatchIterator
 from bgflow import DiffEqFlow, BoltzmannGenerator, BoltzmannGeneratorCV, MeanFreeNormalDistribution
 from bgflow import BlackBoxDynamics, BruteForceEstimator
-from tbg.modelwithcv import EGNN_AD2_CV, TBGCV
+from tbg.modelwithcv import EGNN_AD2_CV
+from tbg.cv import TBGCV
 from tbg.models2 import EGNN_dynamics_AD2_cat, EGNN_dynamics_AD2_cat_CV
 
 from src.force import BruteForceEstimatorFast
@@ -85,10 +86,9 @@ if args.type == "cv-condition":
     encoder_layers = [45, 30, 30, args.cv_dimension]
     cv_dimension = encoder_layers[-1]
     tbgcv = TBGCV(encoder_layers=encoder_layers).cuda()
+    tbgcv_checkpoint = torch.load(load_dir+"/mlcv-final.pt")
+    tbgcv.load_state_dict(tbgcv_checkpoint)
     tbgcv.eval()
-    raise NotImplementedError("TBGCV is not implemented yet")
-    # tbgcv_ckpt = torch.load(f"models/{args.filename_mlcv}.pt")
-    tbgcv.load_state_dict(tbgcv_ckpt)
 elif args.type == "label":
     cv_dimension = args.cv_dimension
 else:
@@ -154,6 +154,13 @@ if args.type == "cv-condition" and args.state in ["c5", "c7ax"]:
     state_xyz = (state_xyz - 1.5508) / 0.6695
     state_heavy_atom_distance = coordinate2distance(state_xyz).cuda()
     state_heavy_atom_distance = state_heavy_atom_distance.repeat(n_samples, 1)
+elif args.type == "label":
+    if args.state == "c5":
+        cv_condition = torch.ones((n_samples, cv_dimension)).cuda()
+    elif args.state == "c7ax":
+        cv_condition = torch.zeros((n_samples, cv_dimension)).cuda()
+    else:
+        raise ValueError("Invalid state for label condition")
 elif args.state == "none":
     state_heavy_atom_distance = None
 # else:
@@ -166,13 +173,7 @@ elif args.state == "none":
 #     heavy_atom_distance_avg = []
 #     heavy_atom_distance_difference = []
 #     mse = torch.nn.MSELoss()
-if args.type == "label":
-    if args.state == "c5":
-        cv_condition = torch.ones((n_samples, cv_dimension)).cuda()
-    elif args.state == "c7ax":
-        cv_condition = torch.zeros((n_samples, cv_dimension)).cuda()
-    else:
-        raise ValueError("Invalid state for label condition")
+
 
 
 

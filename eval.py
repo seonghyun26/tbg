@@ -1,72 +1,30 @@
 import os
+import wandb
 import torch
 import scipy
 import numpy as np
 import argparse
-
-
-from bgmol.datasets import AImplicitUnconstrained
-from bgflow.utils import (assert_numpy, distance_vectors, distances_from_vectors, 
-                          remove_mean, IndexBatchIterator, LossReporter, as_numpy, compute_distances
-)
-from bgflow import (GaussianMCMCSampler, DiffEqFlow, BoltzmannGenerator, Energy, Sampler, 
-                    MultiDoubleWellPotential, MeanFreeNormalDistribution, KernelDynamics)
-from tbg.models2 import EGNN_dynamics_AD2, EGNN_dynamics_AD2_cat
-
-import mdtraj as md
-import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
-from tbg.utils import create_adjacency_list, find_chirality_centers, compute_chirality_sign, check_symmetry_change
-
 from tqdm import tqdm
 
 import networkx.algorithms.isomorphism as iso
 import networkx as nx
 from networkx import isomorphism
+from bgmol.datasets import AImplicitUnconstrained
+from bgflow.utils import as_numpy
+from bgflow import MeanFreeNormalDistribution
+
+import mdtraj as md
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+
+from tbg.utils import create_adjacency_list, find_chirality_centers, compute_chirality_sign, check_symmetry_change
+from tbg.cv import TBGCV
 
 
 PHI_ANGLE = [4, 6, 8, 14]
 PSI_ANGLE = [6, 8, 14, 16]
 ALANINE_HEAVY_ATOM_IDX = [0, 4, 5, 6, 8, 10, 14, 15, 16, 18]
 
-
-def compute_dihedral(positions):
-    """http://stackoverflow.com/q/20305272/1128289"""
-    def dihedral(p):
-        if not isinstance(p, np.ndarray):
-            p = p.numpy()
-        b = p[:-1] - p[1:]
-        b[0] *= -1
-        v = np.array([v - (v.dot(b[1]) / b[1].dot(b[1])) * b[1] for v in [b[0], b[2]]])
-        
-        # Normalize vectors
-        v /= np.sqrt(np.einsum('...i,...i', v, v)).reshape(-1, 1)
-        b1 = b[1] / np.linalg.norm(b[1])
-        x = np.dot(v[0], v[1])
-        m = np.cross(v[0], b1)
-        y = np.dot(m, v[1])
-        
-        return np.arctan2(y, x)
-    
-    return np.array(list(map(dihedral, positions)))
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description='Sampling from TBG model')
-    parser.add_argument('--date', type=str, default= "debug", help='Date for the experiment')
-    parser.add_argument('--state', type=str, default= "c5", help='Conditioning state')
-    parser.add_argument('--topology', type=str, default= "c5-tbg", help='State file name for topology')
-    parser.add_argument('--scaling', type=float, default= "1", help='Scaling on data')
-    return parser.parse_args()
-
-args = parse_args()
-
-
-n_particles = 22
-n_dimensions = 3
-scaling = args.scaling
-dim = n_particles * n_dimensions
-save_dir = f"./res/{args.date}"
 
 
 def align_topology(sample, reference, scaling=1):
@@ -85,31 +43,105 @@ def align_topology(sample, reference, scaling=1):
     nm = iso.categorical_node_match("type", -1)
     GM = isomorphism.GraphMatcher(G_reference, G_sample, node_match=nm)
     is_isomorphic = GM.is_isomorphic()
-    # True
+    
     GM.mapping
     initial_idx = list(GM.mapping.keys())
     final_idx = list(GM.mapping.values())
     sample[initial_idx] = sample[final_idx]
-    #print(is_isomorphic)
     return sample, is_isomorphic
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Sampling from TBG model')
+    parser.add_argument('--date', type=str, default= "debug", help='Date for the experiment')
+    parser.add_argument('--state', type=str, default= "c5", help='Conditioning state')
+    parser.add_argument('--topology', type=str, default= "file", help='State file name for topology')
+    parser.add_argument('--scaling', type=float, default= "1", help='Scaling on data')
+    parser.add_argument('--cv_dimension', type=int, default="2", help='cv dimension')
+    parser.add_argument('--tags', nargs='*', default=["evaulation"], help='Tags for Wandb')
+    
+    return parser.parse_args()
+
+args = parse_args()
+
+
+n_particles = 22
+n_dimensions = 3
+scaling = args.scaling
+dim = n_particles * n_dimensions
+save_dir = f"./res/{args.date}"
+
+wandb.init(
+    project="tbg",
+    entity="eddy26",
+    config=vars(args),
+    tags=["evaluation"] + args.tags,
+)
+
+
+print(">> Plotting MLCVs")
+data_dir = f"../../simulation/data/alanine"
+projection_dataset = torch.load(f"{data_dir}/uniform-heavy-atom-distance-tbg.pt").cuda()
+tbgcv = TBGCV(encoder_layers=[45, 30, 30, args.cv_dimension]).cuda()
+tbgcv_checkpoint = torch.load(f"./res/{args.date}/model/mlcv-final.pt")
+tbgcv.load_state_dict(tbgcv_checkpoint)
+tbgcv.eval()
+cv = tbgcv(projection_dataset)
+tbgcv.set_cv_range(cv.min(dim=0)[0], cv.max(dim=0)[0], cv.std(dim=0)[0])
+print(f"MLCVs range: {tbgcv.cv_min}, {tbgcv.cv_max}")
+print(f"MLCVs std: {tbgcv.cv_std}")
+cv = tbgcv(projection_dataset).cpu().detach().numpy()
+
+
+psi_list = np.load(f"{data_dir}/uniform-psi.npy")
+phi_list = np.load(f"{data_dir}/uniform-phi.npy")
+c5 = torch.load(f"{data_dir}/c5.pt")
+c7ax = torch.load(f"{data_dir}/c7ax.pt")
+phi_start, psi_start = c5["phi"], c5["psi"]
+phi_goal, psi_goal = c7ax["phi"], c7ax["psi"]
+
+fig, axs = plt.subplots(2, 2, figsize = ( 15, 12 ) )
+axs = axs.ravel()
+for i in range(min(args.cv_dimension, 4)):
+    ax = axs[i]
+    hb = ax.hexbin(
+        phi_list, psi_list, C=cv[:, i],  # data
+        gridsize=30,                     # controls resolution
+        reduce_C_function=np.mean,       # compute average per hexagon
+        cmap='viridis',                  # colormap
+        extent=[-3.15, 3.15, -3.15, 3.15]
+    )
+    ax.scatter(phi_start, psi_start, edgecolors="black", c="w", zorder=101, s=100)
+    ax.scatter(phi_goal, psi_goal, edgecolors="black", c="w", zorder=101, s=300, marker="*")
+    ax.set_xlabel('phi')
+    ax.set_ylabel('psi')
+    ax.set_title(f'CV Dimension {i}')
+    cbar = plt.colorbar(hb, ax=ax)
+    cbar.set_label('CV Value')
+print(f"MLCVs plot saved at {save_dir}/mlcv-hexplot.png")
+wandb.log({"mlcv-hexplot": wandb.Image(fig)})
+plt.savefig(f"{save_dir}/cv-hexplot.png")
+plt.close()
 
 
 # Load dataset and samples for evaluation
 dataset = AImplicitUnconstrained(root=os.getcwd()+"/../tbg/", read=True, download=False)
 data = dataset.xyz
 target = dataset.get_energy_model()
-data_energies = target.energy(torch.from_numpy(dataset.xyz[::10].reshape(-1,66)))
 latent_np = torch.load(f"./res/{args.date}/result/latent-{args.state}.pt").cpu().detach().numpy()
 samples_np = torch.load(f"./res/{args.date}/result/samples-{args.state}.pt").cpu().detach().numpy()
 dlogp_np = torch.load(f"./res/{args.date}/result/dlogp-{args.state}.pt").cpu().detach().numpy()
 
 
-print("Aligning samples")
+print(">> Aligning samples")
 aligned_samples = []
 aligned_idxs = []
 atom_dict = {"C": 0, "H":1, "N":2, "O":3}
-# topology = dataset.system.mdtraj_topology
-topology = md.load(f"data/AD2/c5-tbg.pdb").topology
+if args.topology == "dataset":
+    topology = dataset.system.mdtraj_topology
+elif args.topology == "file":
+    topology = md.load(f"data/AD2/c5-tbg.pdb").topology
+else:
+    raise ValueError("Topology file not found.")
 atom_types = []
 for atom_name in topology.atoms:
     atom_types.append(atom_name.name[0])
@@ -128,6 +160,7 @@ for i, sample in enumerate(pbar):
 aligned_samples = np.array(aligned_samples)
 aligned_samples.shape
 print(f"Correct configuration rate {len(aligned_samples)/len(samples_np)}")
+wandb.log({"correct_configuration_rate": len(aligned_samples)/len(samples_np)})
 if len(aligned_samples) == 0:
     raise ValueError("No samples were aligned correctly.")
 
@@ -142,6 +175,7 @@ symmetry_change = check_symmetry_change(model_samples, chirality_centers, refere
 model_samples[symmetry_change] *=-1
 symmetry_change = check_symmetry_change(model_samples, chirality_centers, reference_signs)
 print(f"Correct symmetry rate {(~symmetry_change).sum()/len(model_samples)}")
+wandb.log({"correct_symmetry_rate": (~symmetry_change).sum()/len(model_samples)})
 traj_samples = md.Trajectory(as_numpy(model_samples)[~symmetry_change], topology=topology)
 phis = md.compute_phi(traj_samples)[1].flatten()
 psis = md.compute_psi(traj_samples)[1].flatten()
@@ -153,17 +187,16 @@ plot_range = [-np.pi, np.pi]
 fig, ax = plt.subplots(figsize=(11, 9))
 h, x_bins, y_bins, im = ax.hist2d(phis, psis, 100, norm=LogNorm(), range=[plot_range,plot_range],rasterized=True)
 ticks = np.array([np.exp(-6)*h.max(), np.exp(-4.0)*h.max(),np.exp(-2)*h.max(), h.max()])
-ax.set_xlabel(r"$\varphi$", fontsize=45)
-ax.set_title("Boltzmann Generator", fontsize=45)
+# ax.set_xlabel(r"$\varphi$", fontsize=45)
+ax.set_title("Sample distribution", fontsize=45)
 ax.xaxis.set_tick_params(labelsize=25)
 ax.yaxis.set_tick_params(labelsize=25)
 cbar = fig.colorbar(im, ticks=ticks)
-cbar.ax.set_yticklabels([6.0,4.0,2.0,0.0], fontsize=25)
 cbar.ax.invert_yaxis()
-cbar.ax.set_ylabel(r"Free energy / $k_B T$", fontsize=35)
-fig.savefig(f"{save_dir}/{args.state}-ram.png")
 print(f"Ramachandran plot saved at {save_dir}/{args.state}-ram.png")
-
+wandb.log({"ramachandran_plot": wandb.Image(fig)})
+plt.savefig(f"{save_dir}/{args.state}-ram.png")
+plt.close()
 
 
 # Energy evaluation
@@ -173,8 +206,10 @@ classical_target_energies = as_numpy(target.energy(torch.from_numpy(dataset.xyz[
 prior = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False).cuda()
 idxs = np.array(aligned_idxs)[~symmetry_change]
 log_w_np = -classical_model_energies + as_numpy(prior.energy(torch.from_numpy(latent_np[idxs]).cuda())) + dlogp_np.reshape(-1,1)[idxs]
-np.save("classical_target_energies.npy", classical_target_energies)
+np.save(f"{save_dir}/{args.state}-classical_target_energies.npy", classical_target_energies)
+np.save(f"{save_dir}/{args.state}-classical_model_energies.npy", classical_model_energies)
 print(">>Plotting energy distribution")
+
 fig = plt.figure(figsize=(16, 9))
 plt.hist(classical_target_energies, bins=100, alpha=0.5, range=(-50,100), density=True, label="MD")
 plt.hist(classical_model_energies, bins=100,alpha=0.5, range=(-50,100), density=True, label="BG")
@@ -184,7 +219,10 @@ plt.yticks(fontsize=20)
 plt.legend(fontsize=20)
 plt.xlabel("Energy in kbT", fontsize=20) 
 plt.title("Classical - Energy distribution", fontsize=25)
-fig.savefig(f"{save_dir}/{args.state}-energy_distribution.png")
+plt.savefig(f"{save_dir}/{args.state}-energy_distribution.png")
+plt.close()
 print(f"Energy distribution saved at {save_dir}/{args.state}-energy_distribution.png")
+wandb.log({"energy_distribution": wandb.Image(fig)})
 
+wandb.finish()
 exit(0)

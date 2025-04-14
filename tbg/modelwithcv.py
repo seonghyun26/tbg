@@ -1,73 +1,9 @@
 import torch
 import torch.nn as nn
-import lightning
-
-from mlcolvar.cvs import BaseCV
-from mlcolvar.core import FeedForward, Normalization
 
 from tbg.gcl import E_GCL_vel, E_GCL, GCL
 from tbg.utils import remove_mean, remove_mean_with_mask
 
-
-
-class TBGCV(BaseCV, lightning.LightningModule):
-    BLOCKS = ["norm_in", "encoder",]
-
-    def __init__(
-        self,
-        encoder_layers: list,
-        options: dict = None,
-        **kwargs,
-    ):
-        super().__init__(in_features=encoder_layers[0], out_features=encoder_layers[-1], **kwargs)
-        # ======= OPTIONS =======
-        options = self.parse_options(options)
-        self.cv_normalize = False
-        self.cv_min = 0
-        self.cv_max = 1
-        self.condition = False
-        
-        # ======= BLOCKS =======
-        # initialize norm_in
-        o = "norm_in"
-        if (options[o] is not False) and (options[o] is not None):
-            self.norm_in = Normalization(self.in_features, **options[o])
-
-        # initialize encoder
-        o = "encoder"
-        self.encoder = FeedForward(encoder_layers, **options[o])
-
-    def forward_cv(self, x: torch.Tensor) -> torch.Tensor:
-        """Evaluate the CV without pre or post/processing modules."""
-        if not self.condition:
-            return torch.zeros(x.shape[0], self.out_features).to(x.device)
-        
-        if self.norm_in is not None:
-            x = self.norm_in(x)
-        x = self.encoder(x)
-        
-        # if self.cv_normalize:
-        #     x = self._map_range(x)
-        
-        # x = torch.nn.functional.normalize(x, p=2, dim=1)
-        return x
-
-    def set_cv_range(self, cv_min, cv_max, cv_std):
-        self.cv_normalize = True
-        self.cv_min = cv_min
-        self.cv_max = cv_max
-        self.cv_std = cv_std
-
-    def _map_range(self, x):
-        out_max = 1
-        out_min = -1
-        return (x - self.cv_min) * (out_max - out_min) / (self.cv_max - self.cv_min) + out_min
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.forward_cv(x)
-        # normalized_x = F.normalize(x, p=2, dim=1)
-        
-        return x
 
 
 class EGNN_dynamics(nn.Module):
