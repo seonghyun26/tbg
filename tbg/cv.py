@@ -55,6 +55,5 @@ class TBGCV(BaseCV, lightning.LightningModule):
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         x = self.forward_cv(x)
-        # normalized_x = F.normalize(x, p=2, dim=1)
         
         return x

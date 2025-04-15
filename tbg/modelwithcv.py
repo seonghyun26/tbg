@@ -184,18 +184,13 @@ class EGNN_AD2_CV(nn.Module):
 class EGNN_AD2_CFG(nn.Module):
     def __init__(self, n_particles, n_dimension,h_initial, hidden_nf=64, device='cpu',
             act_fn=torch.nn.SiLU(), n_layers=4, recurrent=True, attention=False,
-                 condition_time=True, condition_cv=True, tanh=False, mode='egnn_dynamics', agg='sum'):
+                 condition_time=True, cv_dimension=0, condition_cv=True, tanh=False, mode='egnn_dynamics', agg='sum'):
         super().__init__()
         self.mode = mode
         self.device = device
         self._n_particles = n_particles
         self._n_dimension = n_dimension
-        
-        # Add cv representation, add it for the one hot encoding in h
-        encoder_layers = [45, 30, 30, 2]
-        cv_dimension = encoder_layers[-1]
-        self.cv = TBGCV(encoder_layers=encoder_layers).to(device)
-        self.cv.train()
+        self.cv_dimension = cv_dimension 
         
         # Initial one hot encoding of the different element types
         self.h_initial = h_initial
@@ -205,7 +200,7 @@ class EGNN_AD2_CFG(nn.Module):
             if condition_time:
                 h_size += 1
             if condition_cv:
-                h_size += cv_dimension
+                h_size += self.cv_dimension
             
             self.egnn = EGNN(in_node_nf=h_size, in_edge_nf=1, hidden_nf=hidden_nf, device=device, act_fn=act_fn, n_layers=n_layers, recurrent=recurrent, attention=attention, tanh=tanh, agg=agg)
         else:
@@ -221,12 +216,6 @@ class EGNN_AD2_CFG(nn.Module):
 
 
     def forward(self, t, xs, cv_condition=None):
-        # CV shape: batch_size * cv_dimension
-        if cv_condition is not None:
-            heavy_atom_distance = xs[:, self._n_particles * 3:]
-            xs = xs[:, :self._n_particles * 3]
-            cv = self.cv.forward_cv(heavy_atom_distance)
-
         # Batch
         n_batch = xs.shape[0]
         edges = self._cast_edges2batch(self.edges, n_batch, self._n_particles)
@@ -238,11 +227,11 @@ class EGNN_AD2_CFG(nn.Module):
         h = self.h_initial.to(self.device).reshape(1,-1)
         h = h.repeat(n_batch, 1)
         h = h.reshape(n_batch * self._n_particles, -1)
-        if cv_condition is not None:
-            condition = cv.repeat(n_batch, 1).reshape(n_batch * self._n_particles, -1)
-        else:
-            condition = torch.zeros(n_batch * self._n_particles, 2).to(self.device)
-        h = torch.cat([h, condition], dim=1)
+        
+        # CV condition with CFG
+        if self.cv_dimension and cv_condition is not None:
+            cv_condition_molecule = cv_condition.repeat_interleave(self._n_particles, dim=0)
+            h = torch.cat([h, cv_condition_molecule], dim=1)
         
         # Time
         t = torch.as_tensor(t, device=xs.device)
@@ -263,6 +252,8 @@ class EGNN_AD2_CFG(nn.Module):
             
         vel = vel.view(n_batch, self._n_particles, self._n_dimension)
         vel = remove_mean(vel)
+        
+        # TODO: samplign with guidance
         
         #print(t, xs)
         self.counter += 1

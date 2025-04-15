@@ -1,20 +1,23 @@
 cd ../
 
-# FILE_NAME="tbg-integrated"
-FILE_NAME="tbg-fixed167"
-state=c5
-# state=c7ax
+CURRENT_DATE=0414_151903
+STATE=c7ax
+echo $CURRENT_DATE
+echo $STATE
 
-# CUDA_VISIBLE_DEVICES=$1 python sample-tbgcv.py \
-#     --tags sampling small data-normalization\
-#     --hidden_dim 64 \
-#     --state $state \
-#     --filename $FILE_NAME \
-#     --n_samples 40 \
-#     --n_sample_batches 10 
-
+CUDA_VISIBLE_DEVICES=$1 python sample.py \
+    --date $CURRENT_DATE \
+    --type cv-condition \
+    --tags sampling data-normalization cv-condition \
+    --hidden_dim 64 \
+    --cv_dimension 2 \
+    --state $STATE \
+    --n_samples 100 \
+    --n_sample_batches 20
 
 CUDA_VISIBLE_DEVICES=$1 python eval.py \
-  --file_name $FILE_NAME \
-  --state $state \
-  --topology c5-tbg
+    --date $CURRENT_DATE \
+    --scaling 1.4936519791 \
+    --state $STATE \
+    --topology file
+

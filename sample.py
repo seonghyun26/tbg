@@ -43,6 +43,7 @@ def parse_args():
     parser.add_argument('--date', type=str, default= "debug", help='Date for the experiment')
     parser.add_argument('--hidden_dim', type=int, default="64", help='hidden dimension of EGNN')
     parser.add_argument('--cv_dimension', type=int, default="2", help='cv dimension')
+    parser.add_argument('--guidance_scale', type=float, default="2.0", help='Guidance scale for CFG sampling')
     parser.add_argument('--state', type=str, default="c5", help='one state condition for sampling')
     parser.add_argument('--n_samples', type=int, default= 40, help='number of samples')
     parser.add_argument('--n_sample_batches', type=int, default= 20, help='number of samples batch')
@@ -82,7 +83,7 @@ if not os.path.exists(save_dir):
 
 # Set up
 print(">> Setting up")
-if args.type == "cv-condition":
+if args.type in ["cv-condition", "cfg"]:
     encoder_layers = [45, 30, 30, args.cv_dimension]
     cv_dimension = encoder_layers[-1]
     tbgcv = TBGCV(encoder_layers=encoder_layers).cuda()
@@ -148,7 +149,7 @@ total_start_time = time.time()
 
 
 # Conditioning
-if args.type == "cv-condition" and args.state in ["c5", "c7ax"]:
+if args.type in ["cv-condition", "cfg"] and args.state in ["c5", "c7ax"]:
     state_path = f"../../simulation/data/alanine/{args.state}-tbg.pt"
     state_xyz = torch.load(state_path)['xyz']
     state_xyz = (state_xyz - 1.5508) / 0.6695
@@ -163,16 +164,8 @@ elif args.type == "label":
         raise ValueError("Invalid state for label condition")
 elif args.state == "none":
     state_heavy_atom_distance = None
-# else:
-#     data_xyz_path = args.data_xyz_path
-#     data_xyz = torch.load(data_xyz_path)
-#     data_distance_path = args.data_distance_path
-#     data_distance = torch.load(data_distance_path)
-#     batch_iter = IndexBatchIterator(len(data_xyz), n_samples)
-#     rmsd = []
-#     heavy_atom_distance_avg = []
-#     heavy_atom_distance_difference = []
-#     mse = torch.nn.MSELoss()
+else:
+    raise ValueError(f"Invalid state {args.state}")
 
 
 
@@ -190,7 +183,12 @@ for i in pbar:
             samples, latent, dlogp = bg.sample(n_samples, with_latent=True, with_dlogp=True)
         elif args.type in ["label"]:
             samples, latent, dlogp = bg.sample(n_samples, cv_condition=cv_condition, with_latent=True, with_dlogp=True)
-        else:
+        elif args.type == "cv-condition":
+            cv_condition = tbgcv(state_heavy_atom_distance)
+            samples, latent, dlogp = bg.sample(n_samples, cv_condition=cv_condition, with_latent=True, with_dlogp=True)
+        elif args.type == "cfg":
+            # null_condition = torch.zeros_like(cv_condition)
+            # samples_uncondition, latent_uncondition, dlogp_uncondition = bg.sample(n_samples, cv_condition=null_condition, with_latent=True, with_dlogp=True)
             cv_condition = tbgcv(state_heavy_atom_distance)
             samples, latent, dlogp = bg.sample(n_samples, cv_condition=cv_condition, with_latent=True, with_dlogp=True)
         batch_end_time = time.time()
@@ -220,38 +218,6 @@ for i in pbar:
 #     latent_np = latent_np.reshape(-1, dim)
 #     samples_np = samples_np.reshape(-1, dim)
 
-
-
-# TODO: Sampling with guidance scale in case of CFG
-# for it, idx in enumerate(tqdm.tqdm(batch_iter, desc="Sampling from BG")):
-#     x1 = data_xyz[idx][:, 1].cuda()
-#     x1_distance = data_distance[idx][:, 0].cuda()
-#     heavy_atom_distance_avg.append(x1_distance.mean())
-#     n_samples = x1.shape[0]
-#     with torch.no_grad():
-#         samples, latent, dlogp = bg.sample(n_samples, cv_condition=x1_distance, with_latent=True, with_dlogp=True)
-#         latent_np = np.append(latent_np, latent.detach().cpu().numpy())
-#         samples_np = np.append(samples_np, samples.detach().cpu().numpy())
-#         dlogp_np = np.append(dlogp_np, as_numpy(dlogp))
-    
-#     rmsd_list = []
-#     for i in range(n_samples):
-#         sample = samples[i].reshape(-1, 3)
-#         reference = x1[i].reshape(-1, 3)
-#         rmsd_list.append(kabsch_rmsd(reference, sample))
-    
-#     rmsd.append(torch.stack(rmsd_list).mean())
-#     heavy_atom_distance_difference.append(mse(coordinate2distance(samples), x1_distance))
-# wandb.log({
-#     "rmsd": torch.stack(rmsd).mean(),
-#     "heavy_atom_distance_difference": torch.stack(heavy_atom_distance_difference).mean(),
-#     "heavy_atom_distance_avg": torch.stack(heavy_atom_distance_avg).mean(),
-#     "heavy_atom_distance_std": torch.stack(heavy_atom_distance_avg).std(),
-# })
-# print(f"RMSD: {torch.stack(rmsd).mean()}")
-# print(f"Heavy atom distance difference: {torch.stack(heavy_atom_distance_difference).mean()}")
-# print(f"Heavy atom distance avg: {torch.stack(heavy_atom_distance_avg).mean()}")
-# print(f"Heavy atom distance std: {torch.stack(heavy_atom_distance_avg).std()}")
 
 
 # Save final results
