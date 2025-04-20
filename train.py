@@ -8,7 +8,7 @@ import argparse
 from bgflow.utils import IndexBatchIterator
 from bgflow import DiffEqFlow, MeanFreeNormalDistribution
 from tbg.modelwithcv import EGNN_AD2_CV
-from tbg.cv import TBGCV
+from tbg.cv import TBGCV, TracedWrapper
 from bgflow import BlackBoxDynamics, BruteForceEstimator
 
 from tqdm import tqdm
@@ -42,17 +42,16 @@ def parse_args():
     return parser.parse_args()
 
 args = parse_args()
-
 n_particles = 22
 n_dimensions = 3
 dim = n_particles * n_dimensions
-atom_types = np.arange(22)
+atom_types = np.arange(n_particles)
 atom_types[[1, 2, 3]] = 2
 atom_types[[11, 12, 13]] = 12
 atom_types[[19, 20, 21]] = 20
 h_initial = torch.nn.functional.one_hot(torch.tensor(atom_types))
 
-
+# Logging
 wandb.init(
     project="tbg",
     entity="eddy26",
@@ -68,19 +67,16 @@ json.dump(
     open(save_dir + "/args.json", "w"),
 )
 
+
+# Setup models
 if args.type in ["cv-condition", "cfg"]:
     encoder_layers = [45, 30, 30, args.cv_dimension]
     cv_dimension = encoder_layers[-1]
     tbgcv = TBGCV(encoder_layers=encoder_layers).cuda()
-    tbgcv.eval()
-elif args.type == "label":
-    cv_dimension = args.cv_dimension
+    tbgcv.train()
 else:
     cv_dimension = 0
-
-
 prior = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False).cuda()
-prior_cpu = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False)
 brute_force_estimator = BruteForceEstimator()
 net_dynamics = EGNN_AD2_CV(
     n_particles=n_particles,
@@ -102,24 +98,26 @@ bb_dynamics = BlackBoxDynamics(
     dynamics_function=net_dynamics, divergence_estimator=brute_force_estimator
 )
 flow = DiffEqFlow(dynamics=bb_dynamics)
+if args.type in ["cv-condition", "cfg"]:
+    wandb.watch([tbgcv, net_dynamics], log="parameters", log_freq=100)
+else:
+    wandb.watch(net_dynamics, log="parameters", log_freq=100)
 
-
-# Load dataset, set up optimizer
+# Load dataset
 data_current_xyz = torch.load(args.current_xyz).cuda().reshape(-1, 22 * 3)
 data_current_distance = torch.load(args.current_distance).cuda()
+data_timelag_xyz = torch.load(args.timelag_xyz).cuda().reshape(-1, 22 * 3)
 data_label = torch.load(args.current_label).cuda()
-data_timelag_xyz = torch.load(args.timelag_xyz).cuda()
 batch_iter = IndexBatchIterator(len(data_current_xyz), args.n_batch)
-if args.type in ["cv-condition", "cfg"]:
-    wandb.watch([tbgcv, net_dynamics], log="all", log_freq=100)
-else:
-    wandb.watch(net_dynamics, log="all", log_freq=100)
-optim_tbg = torch.optim.AdamW(flow.parameters(), lr=1e-6, weight_decay=1e-3)
-scheduler_tbg = CosineAnnealingWarmUpRestarts(optim_tbg, T_0=args.n_epochs, T_up=args.warmup, eta_max=5e-4, gamma=0.5)
 
-optim_cv = torch.optim.AdamW(tbgcv.parameters(), lr=1e-6, weight_decay=1e-3)
-# scheduler_cv = CosineAnnealingWarmUpRestarts(optim_cv, T_0=int(args.n_epochs / 2), T_up=args.warmup, eta_max=5e-4, gamma=0.5)
-scheduler_cv = CosineAnnealingWarmUpRestarts(optim_cv, T_0=args.n_epochs, T_up=args.warmup, eta_max=5e-4, gamma=0.5)
+
+# Set optimizer, scheduler
+optim = torch.optim.AdamW(list(flow.parameters()) + list(tbgcv.parameters()), lr=1e-6, weight_decay=1e-3)
+scheduler = CosineAnnealingWarmUpRestarts(optim, T_0=args.n_epochs, T_up=args.warmup, eta_max=5e-4, gamma=0.5)
+# optim_tbg = torch.optim.AdamW(flow.parameters(), lr=1e-6, weight_decay=1e-3)
+# scheduler_tbg = CosineAnnealingWarmUpRestarts(optim_tbg, T_0=args.n_epochs, T_up=args.warmup, eta_max=5e-4, gamma=0.5)
+# optim_cv = torch.optim.AdamW(tbgcv.parameters(), lr=1e-6, weight_decay=1e-3)
+# scheduler_cv = CosineAnnealingWarmUpRestarts(optim_cv, T_0=args.n_epochs, T_up=args.warmup, eta_max=5e-4, gamma=0.5)
 
 epoch_loss = torch.tensor(0.0).cuda()
 pbar = tqdm(range(args.n_epochs), desc = f"Loss: {epoch_loss:.4f}",)
@@ -127,39 +125,31 @@ for epoch in pbar:
     loss_list = []
     
     for it, idx in enumerate(batch_iter):
-        optim_tbg.zero_grad()
-
-        # Load data
-        x1_current = data_current_xyz[idx]
-        batchsize = x1_current.shape[0]
+        optim.zero_grad()
+        
+        batch_size = data_timelag_xyz[idx].shape[0]
         
         # type
-        if args.type == "repro":
-            x1 = x1_current
-            cv_condition = None
-        elif args.type == "label":
-            x1 = x1_current
-            x1_label = data_label[idx]
-            cv_condition = x1_label.unsqueeze(1).repeat(1, cv_dimension)
-        elif args.type == "cfg":
-            x1_timelag = data_timelag_xyz[idx]
-            x1_distance = data_current_distance[idx]
-            uncond_mask = torch.rand(batchsize).cuda() < args.cfg_p
-            x1 = torch.where(uncond_mask[:, None], x1_current, x1_timelag)
-            cv_condition = tbgcv(x1_distance)
-            cv_condition = torch.where(uncond_mask[:, None], torch.zeros_like(cv_condition), cv_condition)
-        elif args.type == "cv-condition":
+        if args.type == "cv-condition":
             x1 = data_timelag_xyz[idx]
             x1_distance = data_current_distance[idx]
             cv_condition = tbgcv(x1_distance)
+        elif args.type == "cfg":
+            x1_current = data_current_xyz[idx]
+            x1_timelag = data_timelag_xyz[idx]
+            x1_distance = data_current_distance[idx]
+            uncond_mask = torch.rand(batch_size).cuda() < args.cfg_p
+            x1 = torch.where(uncond_mask[:, None], x1_current, x1_timelag)
+            cv_condition = tbgcv(x1_distance)
+            cv_condition = torch.where(uncond_mask[:, None], torch.zeros_like(cv_condition), cv_condition)
         else:
             raise ValueError(f"Unknown training type {args.type}")
 
         # calculate regression loss
-        t = torch.rand(batchsize, 1).cuda()
-        x0 = prior.sample(batchsize)
+        t = torch.rand(batch_size, 1).cuda()
+        x0 = prior.sample(batch_size)
         mu_t = x0 * (1 - t) + x1 * t
-        noise = prior.sample(batchsize)
+        noise = prior.sample(batch_size)
         x = mu_t + args.sigma * noise
         ut = x1 - x0
         
@@ -171,26 +161,28 @@ for epoch in pbar:
         loss.backward()
         
         # Step
-        optim_tbg.step()
-        scheduler_tbg.step(epoch + it / len(batch_iter))
-        optim_cv.step()
-        scheduler_cv.step(epoch + it / len(batch_iter))
+        optim.step()
+        scheduler.step(epoch + int(it / len(batch_iter)))
+        # optim_tbg.step()
+        # scheduler_tbg.step(epoch + it / len(batch_iter))
+        # optim_cv.step()
+        # scheduler_cv.step(epoch + it / len(batch_iter))
     epoch_loss = np.mean(loss_list)
     pbar.set_description(f"Loss: {epoch_loss:.4f}")
     
     wandb.log({
         "loss": epoch_loss,
-        "lr/tbg": scheduler_tbg.get_last_lr()[0],
-        "lr/cv": scheduler_cv.get_last_lr()[0],
-        "model/cv": tbgcv.training
+        "lr": scheduler.get_last_lr()[0],
+        # "lr/tbg": scheduler_tbg.get_last_lr()[0],
+        # "lr/cv": scheduler_cv.get_last_lr()[0],
     }, step=epoch)
     
-    if epoch % 400 == 0 and epoch != 0:
+    if epoch == 500:
         print(f"Epoch {epoch}")
         torch.save(
             {
                 "model_state_dict": flow.state_dict(),
-                "optimizer_state_dict": optim_tbg.state_dict(),
+                "optimizer_state_dict": optim.state_dict(),
                 "epoch": epoch,
             },
             save_dir + f"/tbg-{epoch}.pt",
@@ -201,23 +193,21 @@ for epoch in pbar:
                 save_dir + f"/mlcv-{epoch}.pt",   
             )
         
-print(f">> Final epoch {epoch}")
+print(f">> Training finished")
 torch.save(
     {
         "model_state_dict": flow.state_dict(),
-        "optimizer_state_dict": optim_tbg.state_dict(),
+        "optimizer_state_dict": optim.state_dict(),
         "epoch": epoch,
     },
     save_dir + f"/tbg-final.pt",
 )
-wandb.save(save_dir + f"/tbg-final.pt")
-
+# wandb.save(save_dir + f"/tbg-final.pt")
 if args.type in ["cv-condition", "cfg"]:
     torch.save(
         tbgcv.state_dict(),
         save_dir + f"/mlcv-final.pt",   
     )
-    wandb.save(save_dir + f"/mlcv-final.pt")
-print(f"Model saved to {save_dir}")
 
+print(f"Model saved to {save_dir}")
 wandb.finish()

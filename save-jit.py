@@ -4,14 +4,6 @@ import lightning
 from mlcolvar.cvs import BaseCV
 from mlcolvar.core import FeedForward, Normalization
 
-class TracedWrapper(torch.nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model  # lightning module
-
-    def forward(self, x):
-        return self.model.encode(x) 
-
 class TBGCV(BaseCV, lightning.LightningModule):
     BLOCKS = ["norm_in", "encoder",]
     def __init__(
@@ -66,14 +58,23 @@ class TBGCV(BaseCV, lightning.LightningModule):
         
         return x
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+class TracedWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model  # lightning module
 
-        if self.preprocessing is not None:
-            x = self.preprocessing(x)
+    def forward(self, x):
+        return self.model.encode(x)  # or encode(x)
 
-        x = self.forward_cv(x)
 
-        if self.postprocessing is not None:
-            x = self.postprocessing(x)
+encoder_layers = [45, 30, 30, 1]
+tbgcv = TBGCV(encoder_layers=encoder_layers)
 
-        return x
+ckpt_path = "./res/0419_185536/model"
+ckpt = torch.load(ckpt_path + "/mlcv-final.pt")
+tbgcv.load_state_dict(ckpt)
+
+wrapper = TracedWrapper(tbgcv)
+example_input = torch.rand(1, 45)
+traced = torch.jit.trace(wrapper, example_input)
+traced.save(ckpt_path + "/mlcv-jit-final.pt", )

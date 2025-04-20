@@ -180,6 +180,123 @@ class EGNN_AD2_CV(nn.Module):
             self._edges_dict[n_batch] = [rows_total, cols_total]
         return self._edges_dict[n_batch]
     
+
+
+class Finetune_MLP(nn.Module):
+    def __init__(self, h_size, cv_dimension):
+        super(Finetune_MLP, self).__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(h_size + cv_dimension, 128),
+            nn.SiLU(),
+            nn.Linear(128, 64),
+            nn.SiLU(),
+            nn.Linear(64, h_size),
+        )
+
+    def forward(self, x):
+        return self.mlp(x)
+
+class EGNN_AD2_CV_FINETUNE(nn.Module):
+    def __init__(
+            self, n_particles, n_dimension,h_initial, hidden_nf=64, device='cpu',
+            act_fn=torch.nn.SiLU(), n_layers=4, recurrent=True, attention=False,
+            condition_time=True, cv_dimension=0, tanh=False, mode='egnn_dynamics', agg='sum',
+        ):
+        super().__init__()
+        self.mode = mode
+        self.device = device
+        self._n_particles = n_particles
+        self._n_dimension = n_dimension
+        self.cv_dimension = cv_dimension
+        
+        # Initial one hot encoding of the different element types
+        self.h_initial = h_initial
+
+        if mode == 'egnn_dynamics':
+            h_size = h_initial.size(1)
+            if condition_time:
+                h_size += 1
+            
+            self.finetune_mlp = Finetune_MLP(h_size, cv_dimension)
+            self.egnn = EGNN(in_node_nf=h_size, in_edge_nf=1, hidden_nf=hidden_nf, device=device, act_fn=act_fn, n_layers=n_layers, recurrent=recurrent, attention=attention, tanh=tanh, agg=agg)
+        else:
+            raise NotImplemented()
+
+
+        self.edges = self._create_edges()
+        self._edges_dict = {}
+        self.condition_time = condition_time
+        
+        # Count function calls
+        self.counter = 0
+
+
+    def forward(self, t, xs, cv_condition):
+        # Batch
+        xs = xs[:, :self._n_particles * 3]
+        n_batch = xs.shape[0]
+        edges = self._cast_edges2batch(self.edges, n_batch, self._n_particles)
+        edges = [edges[0], edges[1]]
+        x = xs.reshape(n_batch * self._n_particles, self._n_dimension).clone()
+        
+        
+        # node feature
+        h = self.h_initial.to(self.device).reshape(1,-1)
+        h = h.repeat(n_batch, 1)
+        h = h.reshape(n_batch * self._n_particles, -1)
+        
+        if self.finetune_mlp is not None:
+            cv_condition_molecule = cv_condition.repeat_interleave(self._n_particles, dim=0)
+            h = self.finetune_mlp(torch.cat([h, cv_condition_molecule], dim=1))
+        
+        # Time
+        t = torch.as_tensor(t, device=xs.device)
+        if t.shape != (n_batch,1):
+            t = t.repeat(n_batch)
+        t = t.repeat(1, self._n_particles)
+        t = t.reshape(n_batch*self._n_particles, 1)
+        
+        # NN
+        if self.condition_time:
+            h = torch.cat([h, t], dim=-1)
+        if self.mode == 'egnn_dynamics':
+            edge_attr = torch.sum((x[edges[0]] - x[edges[1]])**2, dim=1, keepdim=True)
+            _, x_final = self.egnn(h, x, edges, edge_attr=edge_attr)
+            vel = x_final - x
+
+        else:
+            raise NotImplemented()
+        
+        vel = vel.view(n_batch, self._n_particles, self._n_dimension)
+        vel = remove_mean(vel)
+        
+        self.counter += 1
+        return vel.view(n_batch,  self._n_particles* self._n_dimension)
+
+    def _create_edges(self):
+        rows, cols = [], []
+        for i in range(self._n_particles):
+            for j in range(i + 1, self._n_particles):
+                rows.append(i)
+                cols.append(j)
+                rows.append(j)
+                cols.append(i)
+        return [torch.LongTensor(rows), torch.LongTensor(cols)]
+
+    def _cast_edges2batch(self, edges, n_batch, n_nodes):
+        if n_batch not in self._edges_dict:
+            self._edges_dict = {}
+            rows, cols = edges
+            rows_total, cols_total = [], []
+            for i in range(n_batch):
+                rows_total.append(rows + i * n_nodes)
+                cols_total.append(cols + i * n_nodes)
+            rows_total = torch.cat(rows_total).to(self.device)
+            cols_total = torch.cat(cols_total).to(self.device)
+
+            self._edges_dict[n_batch] = [rows_total, cols_total]
+        return self._edges_dict[n_batch]
+    
     
 class EGNN_AD2_CFG(nn.Module):
     def __init__(self, n_particles, n_dimension,h_initial, hidden_nf=64, device='cpu',
