@@ -23,7 +23,7 @@ from tbg.cv import TBGCV
 
 PHI_ANGLE = [4, 6, 8, 14]
 PSI_ANGLE = [6, 8, 14, 16]
-ALANINE_HEAVY_ATOM_IDX = [0, 4, 5, 6, 8, 10, 14, 15, 16, 18]
+ALANINE_HEAVY_ATOM_IDX = [1, 4, 5, 6, 8, 10, 14, 15, 16, 18]
 
 
 
@@ -53,6 +53,7 @@ def align_topology(sample, reference, scaling=1):
 def parse_args():
     parser = argparse.ArgumentParser(description='Sampling from TBG model')
     parser.add_argument('--date', type=str, default= "debug", help='Date for the experiment')
+    parser.add_argument('--type', type=str, default="cv-condition", help='training type')
     parser.add_argument('--state', type=str, default= "c5", help='Conditioning state')
     parser.add_argument('--topology', type=str, default= "file", help='State file name for topology')
     parser.add_argument('--scaling', type=float, default= "1", help='Scaling on data')
@@ -78,13 +79,53 @@ wandb.init(
 )
 
 
-print(">> Plotting MLCVs")
-data_dir = f"../../simulation/data/alanine"
-projection_dataset = torch.load(f"{data_dir}/uniform-heavy-atom-distance-tbg.pt").cuda()
-tbgcv = TBGCV(encoder_layers=[45, 30, 30, args.cv_dimension]).cuda()
+if args.type in ["cv-condition", "cfg"]:
+    encoder_layers = [45, 30, 30, args.cv_dimension]
+    tbgcv = TBGCV(encoder_layers=encoder_layers).cuda()
+    tbgcv.eval()
+elif args.type in ["cv-condition-xyz", "cv-condition-xyz-ac"]:
+    encoder_layers = [30, 100, 100, args.cv_dimension]
+    tbgcv = TBGCV(
+        encoder_layers = encoder_layers,
+        options = {
+            "encoder": {
+                "activation": "tanh",
+                "dropout": [0.5, 0.5, 0.5]
+            },
+            "norm_in": {
+            },
+        },
+    ).cuda()
+    tbgcv.eval()
+elif args.type in ["cv-condition-xyzhad"]:
+    encoder_layers = [30, 100, 100, args.cv_dimension]
+    tbgcv = TBGCV(
+        encoder_layers = encoder_layers,
+        options = {
+            "encoder": {
+                "activation": "tanh",
+                "dropout": [0.5, 0.5, 0.5]
+            },
+            "norm_in": {
+            },
+        },
+    ).cuda()
+    tbgcv.eval()
+else:
+    raise ValueError(f"Invalid type: {args.type}")
+
 tbgcv_checkpoint = torch.load(f"./res/{args.date}/model/mlcv-final.pt")
 tbgcv.load_state_dict(tbgcv_checkpoint)
 tbgcv.eval()
+
+# # Projection_dataset
+print(">> Plotting MLCVs")
+data_dir = f"../../simulation/data/alanine"
+if args.type == "cv-condition":
+    projection_dataset = torch.load(f"{data_dir}/uniform-heavy-atom-distance.pt").cuda()
+elif args.type in ["cv-condition-xyz", "cv-condition-xyz-ac"]:
+    projection_dataset = torch.load(f"{data_dir}/uniform-aligned.pt").cuda()
+    projection_dataset = projection_dataset[:, ALANINE_HEAVY_ATOM_IDX].reshape(projection_dataset.shape[0], -1)
 cv = tbgcv(projection_dataset)
 tbgcv.set_cv_range(cv.min(dim=0)[0], cv.max(dim=0)[0], cv.std(dim=0)[0])
 print(f"MLCVs range: {tbgcv.cv_min}, {tbgcv.cv_max}")
@@ -99,24 +140,19 @@ c7ax = torch.load(f"{data_dir}/c7ax.pt")
 phi_start, psi_start = c5["phi"], c5["psi"]
 phi_goal, psi_goal = c7ax["phi"], c7ax["psi"]
 
-fig, axs = plt.subplots(2, 2, figsize = ( 15, 12 ) )
-axs = axs.ravel()
-for i in range(min(args.cv_dimension, 4)):
-    ax = axs[i]
-    hb = ax.hexbin(
-        phi_list, psi_list, C=cv[:, i],  # data
-        gridsize=30,                     # controls resolution
-        reduce_C_function=np.mean,       # compute average per hexagon
-        cmap='viridis',                  # colormap
-        extent=[-3.15, 3.15, -3.15, 3.15]
-    )
-    ax.scatter(phi_start, psi_start, edgecolors="black", c="w", zorder=101, s=100)
-    ax.scatter(phi_goal, psi_goal, edgecolors="black", c="w", zorder=101, s=300, marker="*")
-    ax.set_xlabel('phi')
-    ax.set_ylabel('psi')
-    ax.set_title(f'CV Dimension {i}')
-    cbar = plt.colorbar(hb, ax=ax)
-    cbar.set_label('CV Value')
+fig = plt.figure(figsize=(6, 6))
+ax = fig.add_subplot(1, 1, 1)
+hb = ax.hexbin(
+    phi_list, psi_list, C=cv[:, 0],  # data
+    gridsize=30,                     # controls resolution
+    reduce_C_function=np.mean,       # compute average per hexagon
+    cmap='viridis',                  # colormap
+    extent=[-3.15, 3.15, -3.15, 3.15]
+)
+ax.scatter(phi_start, psi_start, edgecolors="black", c="w", zorder=101, s=100)
+ax.scatter(phi_goal, psi_goal, edgecolors="black", c="w", zorder=101, s=300, marker="*")
+ax.set_xlabel('phi')
+ax.set_ylabel('psi')
 print(f"MLCVs plot saved at {save_dir}/mlcv-hexplot.png")
 wandb.log({"mlcv-hexplot": wandb.Image(fig)})
 plt.savefig(f"{save_dir}/cv-hexplot.png")
@@ -139,7 +175,7 @@ atom_dict = {"C": 0, "H":1, "N":2, "O":3}
 if args.topology == "dataset":
     topology = dataset.system.mdtraj_topology
 elif args.topology == "file":
-    topology = md.load(f"data/AD2/c5-tbg.pdb").topology
+    topology = md.load(f"data/AD2/c5.pdb").topology
 else:
     raise ValueError("Topology file not found.")
 atom_types = []
@@ -162,7 +198,8 @@ aligned_samples.shape
 print(f"Correct configuration rate {len(aligned_samples)/len(samples_np)}")
 wandb.log({"correct_configuration_rate": len(aligned_samples)/len(samples_np)})
 if len(aligned_samples) == 0:
-    raise ValueError("No samples were aligned correctly.")
+    print("No samples were aligned correctly.")
+    aligned_samples = samples_np
 
 
 # Process chirality
@@ -191,8 +228,8 @@ ticks = np.array([np.exp(-6)*h.max(), np.exp(-4.0)*h.max(),np.exp(-2)*h.max(), h
 ax.set_title("Sample distribution", fontsize=45)
 ax.xaxis.set_tick_params(labelsize=25)
 ax.yaxis.set_tick_params(labelsize=25)
-cbar = fig.colorbar(im, ticks=ticks)
-cbar.ax.invert_yaxis()
+# cbar = fig.colorbar(im, ticks=ticks)
+# cbar.ax.invert_yaxis()
 print(f"Ramachandran plot saved at {save_dir}/{args.state}-ram.png")
 wandb.log({"ramachandran_plot": wandb.Image(fig)})
 plt.savefig(f"{save_dir}/{args.state}-ram.png")

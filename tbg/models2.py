@@ -265,7 +265,8 @@ class EGNN_dynamics_transferable_MD(nn.Module):
         x = xs.reshape(n_batch*self._n_particles, self._n_dimension).clone() * node_mask
         # apply the node mask here just in case
         h = h.reshape(n_batch*self._n_particles, -1).to(self.device) * node_mask
-        t = torch.tensor(t).to(xs)
+        # t = torch.tensor(t).to(xs)
+        t = t.clone().detach().to(xs)
         if t.shape != (n_batch, 1):
             t = t.repeat(n_batch)
         t = t.repeat(1, self._n_particles)

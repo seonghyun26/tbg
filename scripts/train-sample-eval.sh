@@ -8,9 +8,11 @@ CV_DIMENSION=1
 
 
 CUDA_VISIBLE_DEVICES=$1 python train.py \
+    --timelag_xyz ../../simulation/dataset/alanine/300.0/tbg-10n-lag30/timelag-xyz.pt \
+    --current_distance ../../simulation/dataset/alanine/300.0/tbg-10n-lag30/current-distance.pt \
     --date $CURRENT_DATE \
     --type cv-condition \
-    --tags training data-normalization cv-condition \
+    --tags training data-normalization \
     --cv_dimension $CV_DIMENSION \
     --hidden_dim 64 
 

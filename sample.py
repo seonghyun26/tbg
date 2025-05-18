@@ -10,12 +10,14 @@ import argparse
 from bgflow.utils import as_numpy, IndexBatchIterator
 from bgflow import DiffEqFlow, BoltzmannGenerator, BoltzmannGeneratorCV, MeanFreeNormalDistribution
 from bgflow import BlackBoxDynamics, BruteForceEstimator
+# from tbg.eval import ALANINE_HEAVY_ATOM_IDX
 from tbg.modelwithcv import EGNN_AD2_CV
 from tbg.cv import TBGCV
 from tbg.models2 import EGNN_dynamics_AD2_cat, EGNN_dynamics_AD2_cat_CV
 
 from src.force import BruteForceEstimatorFast
 
+ALANINE_HEAVY_ATOM_IDX= [1, 4, 5, 6, 8, 10, 14, 15, 16, 18]
 ALANINE_HEAVY_ATOM_IDX_TBG = [0, 4, 5, 6, 8, 10, 14, 15, 16, 18]
 
 
@@ -27,7 +29,7 @@ def coordinate2distance(
     
     for position in positions:
         position = position.reshape(-1, 3)
-        heavy_atom_position = position[ALANINE_HEAVY_ATOM_IDX_TBG]
+        heavy_atom_position = position[ALANINE_HEAVY_ATOM_IDX]
         num_heavy_atoms = len(heavy_atom_position)
         distance = []
         for i in range(num_heavy_atoms):
@@ -37,6 +39,38 @@ def coordinate2distance(
         distance_list.append(distance)
     
     return torch.stack(distance_list)
+
+def kabsch(
+	reference_position: torch.Tensor,
+	position: torch.Tensor,
+) -> torch.Tensor:
+    '''
+        Kabsch algorithm for aligning two sets of points
+        Args:
+            reference_position (torch.Tensor): Reference positions (N, 3)
+            position (torch.Tensor): Positions to align (N, 3)
+        Returns:
+            torch.Tensor: Aligned positions (N, 3)
+    '''
+    # Compute centroids
+    centroid_ref = torch.mean(reference_position, dim=0, keepdim=True)
+    centroid_pos = torch.mean(position, dim=0, keepdim=True)
+    ref_centered = reference_position - centroid_ref  
+    pos_centered = position - centroid_pos
+
+    # Compute rotation, translation matrix
+    covariance = torch.matmul(ref_centered.T, pos_centered)
+    U, S, Vt = torch.linalg.svd(covariance)
+    d = torch.linalg.det(torch.matmul(Vt.T, U.T))
+    if d < 0:
+        Vt = Vt.clone()
+        Vt[-1] = Vt[-1] * -1
+        #  Vt = torch.cat([Vt[:-1], -Vt[-1:].clone()], dim=0)
+    rotation = torch.matmul(Vt.T, U.T)
+
+    # Align position to reference_position
+    aligned_position = torch.matmul(pos_centered, rotation) + centroid_ref
+    return aligned_position
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Sample from TBG')
@@ -59,9 +93,9 @@ args = parse_args()
 n_particles = 22
 n_dimensions = 3
 dim = n_particles * n_dimensions
-scaling = 10
 atom_types = np.arange(22)
-atom_types[[1, 2, 3]] = 2
+atom_types[[0, 2, 3]] = 2
+atom_types[1] = 0
 atom_types[[11, 12, 13]] = 12
 atom_types[[19, 20, 21]] = 20
 h_initial = torch.nn.functional.one_hot(torch.tensor(atom_types))
@@ -85,15 +119,29 @@ if not os.path.exists(save_dir):
 print(">> Setting up")
 if args.type in ["cv-condition", "cfg"]:
     encoder_layers = [45, 30, 30, args.cv_dimension]
-    cv_dimension = encoder_layers[-1]
-    tbgcv = TBGCV(encoder_layers=encoder_layers).cuda()
-    tbgcv_checkpoint = torch.load(load_dir+"/mlcv-final.pt")
-    tbgcv.load_state_dict(tbgcv_checkpoint)
-    tbgcv.eval()
-elif args.type == "label":
+elif args.type in ["cv-condition-xyz", "cv-condition-xyz-ac"]:
+    encoder_layers = [30, 100, 100, args.cv_dimension]
+elif args.type in ["cv-condition-xyzhad"]:
+    encoder_layers = [75, 100, 100, args.cv_dimension]
+tbgcv = TBGCV(
+    encoder_layers = encoder_layers,
+    options = {
+        "encoder": {
+            "activation": "tanh",
+            "dropout": [0.5, 0.5, 0.5]
+        },
+        "norm_in": {
+        },
+    },
+).cuda()
+tbgcv_checkpoint = torch.load(load_dir+"/mlcv-final.pt")
+tbgcv.load_state_dict(tbgcv_checkpoint)
+tbgcv.eval()
+cv_dimension = encoder_layers[-1]
+
+
+if args.type == "label":
     cv_dimension = args.cv_dimension
-else:
-    cv_dimension = 0
 
 prior = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False).cuda()
 prior_cpu = MeanFreeNormalDistribution(dim, n_particles, two_event_dims=False)
@@ -139,9 +187,6 @@ flow._kwargs = {}
 print(f">> Sampling")
 n_samples = args.n_samples
 n_sample_batches = args.n_sample_batches
-# latent_np = np.empty(shape=(0))
-# samples_np = np.empty(shape=(0))
-# dlogp_np = np.empty(shape=(0))
 latent_torch = torch.empty((n_samples * n_sample_batches, dim), dtype=torch.float32).cuda()
 samples_torch = torch.empty((n_samples * n_sample_batches, dim), dtype=torch.float32).cuda()
 dlogp_torch = torch.empty((n_samples * n_sample_batches, 1), dtype=torch.float32).cuda()
@@ -155,6 +200,20 @@ if args.type in ["cv-condition", "cfg"] and args.state in ["c5", "c7ax"]:
     state_xyz = (state_xyz - 1.5508) / 0.6695
     state_heavy_atom_distance = coordinate2distance(state_xyz).cuda()
     state_heavy_atom_distance = state_heavy_atom_distance.repeat(n_samples, 1)
+elif args.type in ["cv-condition-xyz", "cv-condition-xyz-ac"]:
+    state_path = f"../../simulation/data/alanine/{args.state}.pt"
+    state_xyz = torch.load(state_path)['xyz'][:, ALANINE_HEAVY_ATOM_IDX].reshape(1, -1).cuda()
+    reference_state_path = f"../../simulation/data/alanine/c5.pt"
+    reference_state_xyz = torch.load(reference_state_path)['xyz'][:, ALANINE_HEAVY_ATOM_IDX].reshape(1, -1).cuda()
+    if args.state == "c7ax":
+        state_xyz = kabsch(reference_state_xyz, state_xyz)
+    state_xyz = state_xyz.repeat(n_samples, 1)
+elif args.type == "cv-condition-xyzhad":
+    state_path = f"../../simulation/data/alanine/{args.state}.pt"
+    state_xyz = torch.load(state_path)['xyz'][:, ALANINE_HEAVY_ATOM_IDX].reshape(1, -1).cuda()
+    state_had = coordinate2distance(state_xyz).cuda()
+    state_xyzhad = torch.cat([state_xyz, state_had], dim=1)
+    state_xyzhad = state_xyzhad.repeat(n_samples, 1)
 elif args.type == "label":
     if args.state == "c5":
         cv_condition = torch.ones((n_samples, cv_dimension)).cuda()
@@ -186,10 +245,11 @@ for i in pbar:
         elif args.type == "cv-condition":
             cv_condition = tbgcv(state_heavy_atom_distance)
             samples, latent, dlogp = bg.sample(n_samples, cv_condition=cv_condition, with_latent=True, with_dlogp=True)
-        elif args.type == "cfg":
-            # null_condition = torch.zeros_like(cv_condition)
-            # samples_uncondition, latent_uncondition, dlogp_uncondition = bg.sample(n_samples, cv_condition=null_condition, with_latent=True, with_dlogp=True)
-            cv_condition = tbgcv(state_heavy_atom_distance)
+        elif args.type in ["cv-condition-xyz", "cv-condition-xyz-ac"]:
+            cv_condition = tbgcv(state_xyz)
+            samples, latent, dlogp = bg.sample(n_samples, cv_condition=cv_condition, with_latent=True, with_dlogp=True)
+        elif args.type == "cv-condition-xyzhad":
+            cv_condition = tbgcv(state_xyzhad)
             samples, latent, dlogp = bg.sample(n_samples, cv_condition=cv_condition, with_latent=True, with_dlogp=True)
         batch_end_time = time.time()
         pbar.set_description(f"Sampling from BG: {batch_end_time - batch_start_time:.2f} seconds")
