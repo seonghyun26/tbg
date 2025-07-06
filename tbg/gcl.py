@@ -2,6 +2,17 @@ from torch import nn
 import torch
 from torch import linalg as LA
 
+
+class ZeroLinear(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+        self.linear.weight.data.zero_()
+        self.linear.bias.data.zero_()
+        
+    def forward(self, x):
+        return self.linear(x)
+
 class GCL_basic(nn.Module):
     """Graph Neural Net with global state and fixed number of nodes per graph.
     Args:

@@ -41,36 +41,34 @@ def coordinate2distance(
     return torch.stack(distance_list)
 
 def kabsch(
-	reference_position: torch.Tensor,
-	position: torch.Tensor,
+    P: torch.Tensor,
+    Q: torch.Tensor,
 ) -> torch.Tensor:
     '''
         Kabsch algorithm for aligning two sets of points
         Args:
-            reference_position (torch.Tensor): Reference positions (N, 3)
-            position (torch.Tensor): Positions to align (N, 3)
+            P (torch.Tensor): Current positions (N, 3)
+            Q (torch.Tensor): Reference positions (N, 3)
         Returns:
             torch.Tensor: Aligned positions (N, 3)
     '''
-    # Compute centroids
-    centroid_ref = torch.mean(reference_position, dim=0, keepdim=True)
-    centroid_pos = torch.mean(position, dim=0, keepdim=True)
-    ref_centered = reference_position - centroid_ref  
-    pos_centered = position - centroid_pos
+    centroid_P = torch.mean(P, dim=-2, keepdims=True)
+    centroid_Q = torch.mean(Q, dim=-2, keepdims=True)
+    P_centered = P - centroid_P
+    Q_centered = Q - centroid_Q
 
-    # Compute rotation, translation matrix
-    covariance = torch.matmul(ref_centered.T, pos_centered)
-    U, S, Vt = torch.linalg.svd(covariance)
-    d = torch.linalg.det(torch.matmul(Vt.T, U.T))
-    if d < 0:
-        Vt = Vt.clone()
-        Vt[-1] = Vt[-1] * -1
-        #  Vt = torch.cat([Vt[:-1], -Vt[-1:].clone()], dim=0)
-    rotation = torch.matmul(Vt.T, U.T)
+    # Compute the covariance matrix
+    H = torch.matmul(P_centered.transpose(-2, -1), Q_centered)
+    U, S, Vt = torch.linalg.svd(H)
+    d = torch.det(torch.matmul(Vt.transpose(-2, -1), U.transpose(-2, -1))) 
+    Vt[d < 0.0, -1] *= -1.0
 
-    # Align position to reference_position
-    aligned_position = torch.matmul(pos_centered, rotation) + centroid_ref
-    return aligned_position
+    # Optimal rotation and translation
+    R = torch.matmul(Vt.transpose(-2, -1), U.transpose(-2, -1))
+    t = centroid_Q - torch.matmul(centroid_P, R.transpose(-2, -1))
+    P_aligned = torch.matmul(P, R.transpose(-2, -1)) + t
+    
+    return P_aligned
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Sample from TBG')
@@ -187,9 +185,9 @@ flow._kwargs = {}
 print(f">> Sampling")
 n_samples = args.n_samples
 n_sample_batches = args.n_sample_batches
-latent_torch = torch.empty((n_samples * n_sample_batches, dim), dtype=torch.float32).cuda()
-samples_torch = torch.empty((n_samples * n_sample_batches, dim), dtype=torch.float32).cuda()
-dlogp_torch = torch.empty((n_samples * n_sample_batches, 1), dtype=torch.float32).cuda()
+latent_torch = torch.empty((n_samples * n_sample_batches, dim), dtype=torch.float32, device="cuda")
+samples_torch = torch.empty((n_samples * n_sample_batches, dim), dtype=torch.float32, device="cuda")
+dlogp_torch = torch.empty((n_samples * n_sample_batches, 1), dtype=torch.float32, device="cuda")
 total_start_time = time.time()
 
 
@@ -202,11 +200,13 @@ if args.type in ["cv-condition", "cfg"] and args.state in ["c5", "c7ax"]:
     state_heavy_atom_distance = state_heavy_atom_distance.repeat(n_samples, 1)
 elif args.type in ["cv-condition-xyz", "cv-condition-xyz-ac"]:
     state_path = f"../../simulation/data/alanine/{args.state}.pt"
-    state_xyz = torch.load(state_path)['xyz'][:, ALANINE_HEAVY_ATOM_IDX].reshape(1, -1).cuda()
-    reference_state_path = f"../../simulation/data/alanine/c5.pt"
-    reference_state_xyz = torch.load(reference_state_path)['xyz'][:, ALANINE_HEAVY_ATOM_IDX].reshape(1, -1).cuda()
+    state_xyz = torch.load(state_path)['xyz'].cuda()
     if args.state == "c7ax":
-        state_xyz = kabsch(reference_state_xyz, state_xyz)
+        reference_state_path = f"../../simulation/data/alanine/c5.pt"
+        reference_state_xyz = torch.load(reference_state_path)['xyz'].cuda()
+        state_xyz = kabsch(state_xyz, reference_state_xyz)[:, ALANINE_HEAVY_ATOM_IDX].reshape(1, -1)
+    else:
+        state_xyz = state_xyz[:, ALANINE_HEAVY_ATOM_IDX].reshape(1, -1)
     state_xyz = state_xyz.repeat(n_samples, 1)
 elif args.type == "cv-condition-xyzhad":
     state_path = f"../../simulation/data/alanine/{args.state}.pt"
@@ -226,7 +226,8 @@ elif args.state == "none":
 else:
     raise ValueError(f"Invalid state {args.state}")
 
-
+print(f">> Condition state: {args.state}")
+print(f">> MLCV: {tbgcv(state_xyz)[0]}")
 
 
 # Torch sampling
@@ -258,10 +259,10 @@ for i in pbar:
         samples_torch[i * n_samples : (i + 1) * n_samples, :] = samples
         dlogp_torch[i * n_samples : (i + 1) * n_samples, :] = dlogp
         
-    if i % 10 == 0:    
-        torch.save(latent_torch, f"{save_dir}/latent-{args.state}.pt")
-        torch.save(samples_torch, f"{save_dir}/samples-{args.state}.pt")
-        torch.save(dlogp_torch, f"{save_dir}/dlogp-{args.state}.pt")
+    # if i % 10 == 0:    
+    #     torch.save(latent_torch, f"{save_dir}/latent-{args.state}.pt")
+    #     torch.save(samples_torch, f"{save_dir}/samples-{args.state}.pt")
+    #     torch.save(dlogp_torch, f"{save_dir}/dlogp-{args.state}.pt")
 
 # Original numpy concat sampling
 # print(f"Start sampling with {filename}")
